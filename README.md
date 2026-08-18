@@ -83,25 +83,70 @@ zypper --non-interactive install git
 git --version
 ```
 
-### 4. 环境自查
+### 4. 环境自查（NAT/LXD 必做）
 
-安装脚本会自动检查这三项，不过你也可以先手动确认，省得装到一半才报错：
+最新版一键安装器会自动完成以下检查，不通过时会在安装前停止。也可以先手动执行：
 
 ```bash
-# ① root 权限（必须是 0）
+# ① root 权限（必须输出 0）
 id -u
-# 期望输出: 0
 
-# ② TUN 设备（fanout 建 VPN 隧道必需）
-[ -c /dev/net/tun ] && echo "✅ TUN 可用" || echo "❌ TUN 不可用，请找主机商开启"
-
-# ③ 架构（只支持 amd64 / arm64）
+# ② 架构（只支持 x86_64/amd64 和 aarch64/arm64）
 uname -m
-# 期望输出: x86_64 或 aarch64
+
+# ③ TUN 设备
+[ -c /dev/net/tun ] && echo "TUN: OK" || echo "TUN: FAIL"
+
+# ④ 必需命令；OpenVPN 可由安装器安装，ip 必须先存在
+command -v ip || echo "ip: FAIL"
+command -v openvpn || echo "openvpn: 尚未安装"
 ```
 
-如果 `②` 显示不可用，你的机器大概率是 OpenVZ / LXC 容器，需要联系主机商
-**开启 TUN/TAP 设备和网络命名空间**，否则 fanout 无法创建出口隧道。
+#### 完整 network namespace/veth 检测
+
+**只执行 `ip netns add test` 或 `unshare -n true` 不足以证明 fanout 可用。**
+某些 NAT/LXD 容器可以创建 namespace 文件，但执行 `ip netns exec` 时仍会报：
+
+```text
+mount of /sys failed: Operation not permitted
+```
+
+必须完整测试 namespace 执行和 veth 移入能力：
+
+```bash
+NS="af-check-$$"
+VH="afh$$"
+VP="afp$$"
+FAIL=0
+
+ip netns del "$NS" 2>/dev/null || true
+ip link del "$VH" 2>/dev/null || true
+
+ip netns add "$NS" || FAIL=1
+[ "$FAIL" -eq 0 ] && ip netns exec "$NS" ip link set lo up || FAIL=1
+[ "$FAIL" -eq 0 ] && ip link add "$VH" type veth peer name "$VP" || FAIL=1
+[ "$FAIL" -eq 0 ] && ip link set "$VP" netns "$NS" || FAIL=1
+
+ip netns del "$NS" 2>/dev/null || true
+ip link del "$VH" 2>/dev/null || true
+ip link del "$VP" 2>/dev/null || true
+
+[ "$FAIL" -eq 0 ] \
+  && echo "fanout 网络能力: OK" \
+  || echo "fanout 网络能力: FAIL（联系主机商开启权限）"
+```
+
+只有最后输出 `fanout 网络能力: OK` 才能运行 VPNGate 出口。失败通常需要主机商开启：
+
+- `/dev/net/tun`
+- `CAP_NET_ADMIN`
+- network namespace 和 `ip netns exec`
+- veth 创建及移入 namespace
+- namespace 内访问 `/sys`
+- iptables NAT/转发
+
+这些权限无法在受限容器内部自行补齐。检测失败时，sing-box + Cloudflare Argo 入站仍可单独运行，
+但 fanout VPNGate 出口不能运行。随机 SOCKS5 端口（如 `40500`）不需要 NAT 映射，也不是失败原因。
 
 ### 5. 网络要求
 
@@ -120,18 +165,14 @@ uname -m
 3. 点击 **Generate new token** → **Generate new token (classic)**
 4. 勾选 `gist` 权限，生成 Token 并保存（只显示一次）
 
-#### 如果服务器在 OpenVZ / LXC 容器中
+#### 如果服务器在 OpenVZ / LXC / LXD 容器中
 
-联系主机商**开启 TUN/TAP 设备**和**网络命名空间**支持，否则 fanout 无法创建出口隧道。
+先执行上文“环境自查”中的完整 network namespace/veth 检测。不要只用
+`ip netns add` 或 `unshare -n true` 判断，因为它们不能覆盖 fanout 实际使用的
+`ip netns exec`、veth 和 `/sys` 权限。
 
-验证方法：
-```bash
-# 检查 TUN 设备
-[ -c /dev/net/tun ] && echo "✅ TUN 设备可用" || echo "❌ TUN 设备不可用"
-
-# 检查网络命名空间
-unshare -n true 2>/dev/null && echo "✅ netns 可用" || echo "❌ netns 不可用"
-```
+检测失败时，联系主机商开启 TUN、`CAP_NET_ADMIN`、network namespace、veth、
+`/sys` 访问和 iptables NAT，或者换用具备完整网络权限的 KVM VPS。
 
 ---
 
@@ -319,13 +360,31 @@ systemctl restart sb-argo
 
 ## 🔧 常见问题
 
-### Q1: 安装时提示 "缺少 /dev/net/tun 设备"
+### Q1: 安装时提示 TUN 或 network namespace/veth 检测失败
 
-**原因**：你的服务器是 OpenVZ / LXC 容器，且主机商未开启 TUN 设备。
+**原因**：OpenVZ/LXC/LXD/NAT 容器没有获得 fanout 所需的完整网络权限。即使
+`ip netns add` 成功，`ip netns exec` 仍可能因 `/sys` 挂载权限失败。
 
-**解决**：联系主机商工单请求开启 TUN/TAP，或更换为 KVM 虚拟化的 VPS。
+**解决**：执行安装前“环境自查”的完整检测，并把原始错误提交给主机商。要求开启
+TUN、`CAP_NET_ADMIN`、network namespace、veth、`/sys` 访问和 iptables NAT；
+无法开启时需更换支持这些功能的 NAT 容器或 KVM VPS。
 
-### Q2: fanout 面板无法访问
+### Q2: 隧道一直连接中并提示“一轮候选均失败”
+
+先确认日志中的 SBA 后端已经正常：
+
+```bash
+tail -n 50 /var/log/fanout.log
+```
+
+如果能看到 `sing-box-argo-lite 接管`，但所有隧道反复失败，并且
+`/var/lib/fanout/fo1.log` 没有生成，优先执行完整 network namespace/veth 检测。
+失败可能发生在 OpenVPN 启动之前，因此没有 OpenVPN 日志。
+
+隧道卡片显示的随机端口（例如 `40500`）是服务器内部 SOCKS5 监听端口，不需要 NAT
+映射；没映射它不会造成 VPNGate 连接失败。
+
+### Q3: fanout 面板无法访问
 
 NAT 机器不能直接从公网访问本地监听端口。先在服务器本机测试：
 
@@ -347,7 +406,7 @@ curl -I http://127.0.0.1:8899
    `iptables -I INPUT -p tcp --dport 40002 -j ACCEPT`。
 4. 云服务器还需要检查控制台安全组；纯 NAT 容器则检查主机商的端口映射。
 
-### Q3: 日志提示找不到 xray
+### Q4: 日志提示找不到 xray
 
 如果日志出现：
 
@@ -393,7 +452,7 @@ bash install.sh
 `-panel sing-box-argo-lite` 写入 systemd/OpenRC 服务。不要为了这个问题给 NAT 机器
 额外安装 Xray；本组合应该使用 sing-box-argo-lite 后端。
 
-### Q4: 节点能连上但无法上网
+### Q5: 节点能连上但无法上网
 
 **原因**：入站未绑定出口，或出口隧道未建立成功。
 
@@ -402,7 +461,7 @@ bash install.sh
 2. 如果出口是红色 ❌，尝试删除重建或换一个节点
 3. 确认入站已绑定到出口：在"入站管理"中检查 `vless-ws` 的出口字段
 
-### Q5: Gist 订阅无法更新
+### Q6: Gist 订阅无法更新
 
 **原因**：GitHub Token 权限不足或已过期。
 
@@ -411,7 +470,7 @@ bash install.sh
 2. 编辑 `~/.config/sb-argo/secrets.conf`，更新 `GITHUB_TOKEN`
 3. 重启 sing-box：`sb-argo restart`
 
-### Q6: 想换一个出口节点
+### Q7: 想换一个出口节点
 
 **方法 1**（推荐）：
 1. 登录 fanout 面板

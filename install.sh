@@ -46,6 +46,49 @@ ask() {
 }
 
 # === 阶段 1：环境检查与自举 ===
+check_fanout_network_capabilities() {
+  # 仅能创建 netns 不代表 fanout 可用；ip netns exec 还需要宿主机允许
+  # 访问 /sys，且 fanout 还要把 veth 放进 namespace。
+  if ! command -v ip >/dev/null 2>&1; then
+    log_err "未找到 ip 命令，无法检测 network namespace/veth 能力"
+    exit 1
+  fi
+
+  local ns="argo-check-$$"
+  # Linux 接口名最长 15 字符，使用短前缀避免大 PID 导致误报。
+  local host_veth="afh$$"
+  local peer_veth="afp$$"
+  local failed=false
+
+  ip netns del "$ns" 2>/dev/null || true
+  ip link del "$host_veth" 2>/dev/null || true
+  if ! ip netns add "$ns" 2>/dev/null; then
+    failed=true
+  elif ! ip netns exec "$ns" ip link set lo up 2>/dev/null; then
+    log_err "network namespace 可以创建，但 ip netns exec 失败"
+    log_err "这通常是 LXC/NAT 宿主机未允许 namespace 内访问 /sys"
+    failed=true
+  elif ! ip link add "$host_veth" type veth peer name "$peer_veth" 2>/dev/null; then
+    log_err "无法创建 veth，fanout 无法连接母机与出口 namespace"
+    failed=true
+  elif ! ip link set "$peer_veth" netns "$ns" 2>/dev/null; then
+    log_err "无法将 veth 移入 network namespace"
+    failed=true
+  fi
+
+  ip netns del "$ns" 2>/dev/null || true
+  ip link del "$host_veth" 2>/dev/null || true
+  ip link del "$peer_veth" 2>/dev/null || true
+
+  if [ "$failed" = true ]; then
+    log_err "当前容器不满足 fanout 的网络能力要求，安装已停止"
+    log_err "需要主机商开启 CAP_NET_ADMIN、network namespace、veth、/sys 和 TUN 支持"
+    log_err "sing-box + Cloudflare Argo 可以单独运行，但 fanout VPNGate 出口无法运行"
+    exit 1
+  fi
+  log_info "network namespace/veth 能力检测通过"
+}
+
 bootstrap() {
   log_step "环境检查与获取源码"
   
@@ -59,6 +102,11 @@ bootstrap() {
     log_warn "如果你在使用 LXC/OpenVZ 容器，请联系主机商开启 TUN 选项"
     exit 1
   fi
+
+  if ! command -v openvpn >/dev/null 2>&1; then
+    log_warn "尚未安装 openvpn，安装器会尝试自动安装；安装后仍会再次校验"
+  fi
+  check_fanout_network_capabilities
   
   local arch
   arch=$(uname -m)
