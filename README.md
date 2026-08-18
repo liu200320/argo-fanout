@@ -27,7 +27,32 @@
 | **内核** | 支持 TUN 设备、网络命名空间 | 4.19+ |
 | **权限** | root | root |
 
-### 2. 必须先安装 git（在线一键安装必需）
+### 2. NAT 机器特别说明
+
+本项目按 **NAT VPS / LXC NAT 容器**设计，节点入口使用 Cloudflare Quick Tunnel，
+所以不需要服务器有独立公网 IPv4，也不需要把 sing-box 的本地端口暴露到公网。
+
+但 NAT 机器通常有以下限制：
+
+- 必须能创建 `/dev/net/tun` 和 network namespace；只提供普通 NAT、没有 TUN 的容器不能运行 fanout。
+- sing-box 的本地端口（默认 `40001`）只监听 `127.0.0.1`，**不需要做端口映射**。
+- fanout Web 管理面板默认端口 `8899`，安装时可以改成其他端口。NAT 机器如果没有入站端口映射，
+  外部浏览器不能直接访问这个面板，应使用主机商端口映射，或者用 SSH 隧道访问。
+- Cloudflare Argo 节点端口是客户端访问的 `443`，不是 fanout 面板端口，也不需要 NAT 入站映射。
+
+没有端口映射时，推荐使用 SSH 隧道。假设 fanout 面板监听服务器本机 `40002`：
+
+```bash
+ssh -N -L 40002:127.0.0.1:40002 root@你的服务器
+```
+
+然后在本地浏览器打开安装完成后显示的路径：
+
+```text
+http://127.0.0.1:40002/随机路径/
+```
+
+### 3. 必须先安装 git（在线一键安装必需）
 
 `bash <(curl ...)` 在线运行时，脚本会先把仓库 clone 到 `/opt/argo-fanout` 再继续，
 **没有 git 会直接失败**。各系统安装命令：
@@ -58,7 +83,7 @@ zypper --non-interactive install git
 git --version
 ```
 
-### 3. 环境自查
+### 4. 环境自查
 
 安装脚本会自动检查这三项，不过你也可以先手动确认，省得装到一半才报错：
 
@@ -78,7 +103,7 @@ uname -m
 如果 `②` 显示不可用，你的机器大概率是 OpenVZ / LXC 容器，需要联系主机商
 **开启 TUN/TAP 设备和网络命名空间**，否则 fanout 无法创建出口隧道。
 
-### 4. 网络要求
+### 5. 网络要求
 
 - ✅ 能访问 GitHub（用于下载源码和依赖）
 - ✅ 能访问 Cloudflare API（用于建立 Argo 隧道）
@@ -86,7 +111,7 @@ uname -m
 
 如果服务器在国内，建议先配置 GitHub 代理或使用镜像加速。
 
-### 5. 可选准备
+### 6. 可选准备
 
 #### 如果要发布订阅到 GitHub Gist（推荐）
 
@@ -151,6 +176,21 @@ bash install.sh
 | **Web 管理端口** | fanout 管理面板的 HTTP 端口 | `8899` | `8899` |
 
 配置完成后，脚本会显示汇总信息并等待你确认，按回车键开始安装。
+
+安装器会把 fanout 服务固定为以下后端参数，避免自动探测回退到 native/Xray：
+
+```text
+-panel sing-box-argo-lite
+```
+
+安装完成后可以确认：
+
+```bash
+cat /var/lib/fanout/panel_mode
+ps aux | grep '[f]anout'
+```
+
+第二条命令的进程参数中应包含 `-panel sing-box-argo-lite`。
 
 ---
 
@@ -280,12 +320,61 @@ systemctl restart sb-argo
 
 ### Q2: fanout 面板无法访问
 
-**检查清单**：
-1. 确认防火墙已放行端口：`ufw allow 8899` 或 `iptables -I INPUT -p tcp --dport 8899 -j ACCEPT`
-2. 确认服务运行正常：`systemctl status fanout`
-3. 确认访问的 IP 和端口正确：`curl -I http://127.0.0.1:8899`
+NAT 机器不能直接从公网访问本地监听端口。先在服务器本机测试：
 
-### Q3: 节点能连上但无法上网
+```bash
+# Alpine / OpenRC
+rc-service fanout status
+wget -S -O - http://127.0.0.1:40002/ 2>&1 | head
+
+# Debian / Ubuntu / systemd
+systemctl status fanout --no-pager
+curl -I http://127.0.0.1:8899
+```
+
+然后确认访问方式：
+
+1. 有端口映射：在主机商控制台把外部端口映射到 fanout 实际端口。
+2. 没有端口映射：使用 SSH 隧道，例如 `ssh -N -L 40002:127.0.0.1:40002 root@服务器`。
+3. 如果系统防火墙启用，再放行实际面板端口：`ufw allow 40002/tcp` 或
+   `iptables -I INPUT -p tcp --dport 40002 -j ACCEPT`。
+4. 云服务器还需要检查控制台安全组；纯 NAT 容器则检查主机商的端口映射。
+
+### Q3: 日志提示找不到 xray
+
+如果日志出现：
+
+```text
+节点链接后端暂不可用: 找不到 xray 可执行文件
+```
+
+说明 fanout 仍按 native 模式启动，没有使用 sing-box-argo-lite。检查：
+
+```bash
+cat /var/lib/fanout/panel_mode
+ps aux | grep '[f]anout'
+```
+
+应看到：
+
+```text
+sing-box-argo-lite
+-panel sing-box-argo-lite
+```
+
+Alpine / OpenRC 修复方式：
+
+```bash
+sed -i 's#command_args="-dir /var/lib/fanout"#command_args="-dir /var/lib/fanout -panel sing-box-argo-lite"#' /etc/init.d/fanout
+rc-service fanout restart
+tail -n 30 /var/log/fanout.log
+```
+
+systemd 系统则重新从最新仓库安装，安装器会自动把 `-panel sing-box-argo-lite`
+写入服务文件。不要为了这个问题给 NAT 机器额外安装 Xray；本组合应该使用
+sing-box-argo-lite 后端。
+
+### Q4: 节点能连上但无法上网
 
 **原因**：入站未绑定出口，或出口隧道未建立成功。
 
@@ -294,7 +383,7 @@ systemctl restart sb-argo
 2. 如果出口是红色 ❌，尝试删除重建或换一个节点
 3. 确认入站已绑定到出口：在"入站管理"中检查 `vless-ws` 的出口字段
 
-### Q4: Gist 订阅无法更新
+### Q5: Gist 订阅无法更新
 
 **原因**：GitHub Token 权限不足或已过期。
 
@@ -303,7 +392,7 @@ systemctl restart sb-argo
 2. 编辑 `~/.config/sb-argo/secrets.conf`，更新 `GITHUB_TOKEN`
 3. 重启 sing-box：`sb-argo restart`
 
-### Q5: 想换一个出口节点
+### Q6: 想换一个出口节点
 
 **方法 1**（推荐）：
 1. 登录 fanout 面板
