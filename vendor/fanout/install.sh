@@ -61,6 +61,7 @@ svc_install() {
 #!/sbin/openrc-run
 name="fanout"
 description="fanout - VPN Gate 出口扇出网关"
+export ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
 command="${BIN}"
 command_args="-dir ${WORK_DIR}${PANEL_ARGS}"
 command_background=true

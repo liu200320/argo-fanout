@@ -8,6 +8,7 @@ Type=simple
 # 端口由 /var/lib/fanout/settings.json 决定（界面和 f 菜单都改它）。
 # 这里不写 -web，否则改完端口一重启就被拽回旧值。
 ExecStart=/usr/local/bin/fanout -dir /var/lib/fanout
+Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
 Restart=on-failure
 RestartSec=5
 # 退出时给足时间清理 netns 与 openvpn 子进程

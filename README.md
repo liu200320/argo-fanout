@@ -406,7 +406,41 @@ curl -I http://127.0.0.1:8899
    `iptables -I INPUT -p tcp --dport 40002 -j ACCEPT`。
 4. 云服务器还需要检查控制台安全组；纯 NAT 容器则检查主机商的端口映射。
 
-### Q4: 日志提示找不到 xray
+### Q4: sing-box 配置校验提示 legacy domain strategy
+
+如果出现：
+
+```text
+legacy domain strategy options is deprecated in sing-box 1.12.0
+set environment variable ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
+```
+
+这是 sing-box 1.12 对旧版 `domain_strategy` 配置的兼容提示。最新版安装器会自动设置兼容变量；
+已安装的旧版本可以临时修复：
+
+```bash
+export ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
+/root/.local/bin/sb-argo restart
+/root/.local/bin/sb-argo status
+```
+
+如果需要重新校验配置：
+
+```bash
+ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true \
+  /root/.local/share/sb-argo/bin/sing-box check \
+  -c /root/.config/sb-argo/sing-box.json
+```
+
+然后重新运行最新安装器，后续 fanout 接管 sing-box 时也会自动带上该变量：
+
+```bash
+cd /opt/argo-fanout
+git pull
+bash install.sh
+```
+
+### Q5: 日志提示找不到 xray
 
 如果日志出现：
 
@@ -452,7 +486,7 @@ bash install.sh
 `-panel sing-box-argo-lite` 写入 systemd/OpenRC 服务。不要为了这个问题给 NAT 机器
 额外安装 Xray；本组合应该使用 sing-box-argo-lite 后端。
 
-### Q5: 节点能连上但无法上网
+### Q6: 节点能连上但无法上网
 
 **原因**：入站未绑定出口，或出口隧道未建立成功。
 
@@ -461,7 +495,7 @@ bash install.sh
 2. 如果出口是红色 ❌，尝试删除重建或换一个节点
 3. 确认入站已绑定到出口：在"入站管理"中检查 `vless-ws` 的出口字段
 
-### Q6: Gist 订阅无法更新
+### Q7: Gist 订阅无法更新
 
 **原因**：GitHub Token 权限不足或已过期。
 
@@ -470,7 +504,7 @@ bash install.sh
 2. 编辑 `~/.config/sb-argo/secrets.conf`，更新 `GITHUB_TOKEN`
 3. 重启 sing-box：`sb-argo restart`
 
-### Q7: 想换一个出口节点
+### Q8: 想换一个出口节点
 
 **方法 1**（推荐）：
 1. 登录 fanout 面板

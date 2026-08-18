@@ -209,7 +209,9 @@ func (s *SBA) checkConfig(path string) error {
 	if _, err := os.Stat(s.binPath); err != nil {
 		return nil
 	}
-	out, err := exec.Command(s.binPath, "check", "-c", path).CombinedOutput()
+	cmd := exec.Command(s.binPath, "check", "-c", path)
+	cmd.Env = append(os.Environ(), "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sing-box 配置校验失败: %s", trimOutput(out))
 	}
@@ -242,6 +244,7 @@ func (s *SBA) restartSingBox() error {
 	// 与 sb-argo 的启动参数保持一致：低内存机器上这些 Go 运行时开关是必须的
 	script := fmt.Sprintf(
 		"nohup env GOMAXPROCS=1 GOMEMLIMIT=%s GOGC=25 GODEBUG=madvdontneed=1 "+
+			"ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true "+
 			"%s run -c %s </dev/null >>%s 2>&1 & echo $! > %s",
 		shellQuote(mem), shellQuote(s.binPath), shellQuote(s.cfgPath),
 		shellQuote(logFile), shellQuote(pidFile),
