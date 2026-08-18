@@ -269,10 +269,29 @@ install_manager() {
   fi
 }
 
+# 检测系统是否使用 musl libc（Alpine 等）。
+# sing-box 官方 release 分 glibc / musl 两种构建，
+# glibc 动态链接版在 musl 系统上会报 "cannot execute: required file not found"。
+is_musl() {
+  compgen -G "/lib/ld-musl-*.so.1" >/dev/null 2>&1 && return 0
+  compgen -G "/usr/lib/ld-musl-*.so.1" >/dev/null 2>&1 && return 0
+  grep -qi '^ID=alpine' /etc/os-release 2>/dev/null && return 0
+  return 1
+}
+
 download_binaries() {
   force="$1"
 
-  if [ "$force" = "true" ] || [ ! -x "$SB_BIN" ]; then
+  # musl 系统上已存在的二进制若无法运行（例如旧脚本下错成 glibc 构建），
+  # 必须强制重下，否则 -x 检查会误判为"已有"而跳过。
+  sb_bin_broken=false
+  if is_musl && [ -x "$SB_BIN" ] && ! "$SB_BIN" version >/dev/null 2>&1; then
+    sb_bin_broken=true
+    printf '已存在的 sing-box 无法运行，重新下载 musl 构建...\n'
+    rm -f "$SB_BIN"
+  fi
+
+  if [ "$force" = "true" ] || [ ! -x "$SB_BIN" ] || [ "$sb_bin_broken" = "true" ]; then
     printf '正在获取 sing-box...\n'
 
     if [ -z "$SB_VERSION" ]; then
@@ -295,15 +314,28 @@ download_binaries() {
       return 1
     }
 
-    package="sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
+    sb_variant=""
+    if is_musl; then
+      sb_variant="-musl"
+      printf '检测到 musl libc，改用 sing-box 的 musl 构建\n'
+    fi
+    package="sing-box-${SB_VERSION}-linux-${SB_ARCH}${sb_variant}.tar.gz"
     archive="${STATE_DIR}/${package}"
 
     fetch \
       "https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/${package}" \
       "$archive" || return 1
 
-    tar -xOzf "$archive" \
-      "sing-box-${SB_VERSION}-linux-${SB_ARCH}/sing-box" \
+    member="$(
+      tar -tzf "$archive" 2>/dev/null |
+      grep -m1 '/sing-box$' || true
+    )"
+    [ -n "$member" ] || {
+      printf '错误: 压缩包内找不到 sing-box 文件\n' >&2
+      return 1
+    }
+
+    tar -xOzf "$archive" "$member" \
       >"${SB_BIN}.new" || return 1
 
     chmod 700 "${SB_BIN}.new"
