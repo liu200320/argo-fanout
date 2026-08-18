@@ -230,6 +230,7 @@ EOF
   fi
   
   export WEB_PORT="$FO_WEB_PORT"
+  export FANOUT_PANEL_MODE="sing-box-argo-lite"
   
   pushd "${ARGO_FANOUT_ROOT}/vendor/fanout" >/dev/null
   bash install.sh
@@ -239,17 +240,34 @@ EOF
   
   # --- 绑定与重启 ---
   log_step "正在绑定后端模式"
-  
+
   local fo_mode_file="/var/lib/fanout/panel_mode"
   if [ -d "/var/lib/fanout" ]; then
     echo "sing-box-argo-lite" > "$fo_mode_file"
     chmod 600 "$fo_mode_file"
     log_info "已将 fanout 节点后端锁定为 sing-box-argo-lite。"
-    
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet fanout 2>/dev/null; then
-      systemctl restart fanout
+
+    # 关键：fanout 只在进程启动时读一次 panel_mode，
+    # 必须重启让新进程读到。重启失败不能吞掉，否则面板仍停留在自建模式。
+    local restarted=false
+    if command -v systemctl >/dev/null 2>&1; then
+      if systemctl restart fanout 2>/dev/null; then
+        restarted=true
+      else
+        log_warn "systemctl restart fanout 失败"
+      fi
     elif command -v rc-service >/dev/null 2>&1; then
-      rc-service fanout restart 2>/dev/null || true
+      if rc-service fanout restart; then
+        restarted=true
+      else
+        log_warn "rc-service fanout restart 失败"
+      fi
+    fi
+
+    if [ "$restarted" != "true" ]; then
+      log_warn "未能自动重启 fanout 服务，面板可能仍是自建模式。请手动执行："
+      log_warn "  systemctl restart fanout   （或 OpenRC 下 rc-service fanout restart）"
+      log_warn "重启后 fanout 才会读取 panel_mode，切到 sing-box-argo-lite 后端。"
     fi
   else
     log_warn "未找到 fanout 数据目录，未能自动锁定后端模式。请稍后在 Web 界面中手动选择。"

@@ -11,6 +11,9 @@ WEB_PORT_EXPLICIT="${WEB_PORT:+1}"
 WEB_PORT="${WEB_PORT:-8899}"
 WORK_DIR="${WORK_DIR:-/var/lib/fanout}"
 BIN=/usr/local/bin/fanout
+PANEL_MODE="${FANOUT_PANEL_MODE:-}"
+PANEL_ARGS=""
+[[ -n "$PANEL_MODE" ]] && PANEL_ARGS=" -panel $PANEL_MODE"
 
 if [[ $EUID -ne 0 ]]; then
   echo "需要 root 权限（要创建 netns 和改 iptables）" >&2
@@ -48,7 +51,7 @@ svc_install() {
     # 端口不写进服务文件：它由 ${WORK_DIR}/settings.json 决定（见 seed_settings），
     # 两处都写会互相拽回旧值——界面改完重启失效，或 f 改完被配置覆盖。
     # 老版本模板里可能还带 -web，一并去掉。
-    sed "s#-web [0-9]* ##; s#-dir /var/lib/fanout#-dir ${WORK_DIR}#" fanout.service \
+    sed "s#-web [0-9]* ##; s#-dir /var/lib/fanout#-dir ${WORK_DIR}${PANEL_ARGS}#" fanout.service \
       > /etc/systemd/system/fanout.service
     systemctl daemon-reload
   else
@@ -59,7 +62,7 @@ svc_install() {
 name="fanout"
 description="fanout - VPN Gate 出口扇出网关"
 command="${BIN}"
-command_args="-dir ${WORK_DIR}"
+command_args="-dir ${WORK_DIR}${PANEL_ARGS}"
 command_background=true
 pidfile="/run/fanout.pid"
 output_log="/var/log/fanout.log"
