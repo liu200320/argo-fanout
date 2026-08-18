@@ -192,6 +192,55 @@ cd argo-fanout
 bash install.sh
 ```
 
+### 更新到 GitHub 最新版本
+
+每次更新前先备份自定义配置。全新系统直接使用在线脚本即可；已经安装过的机器推荐
+先拉取仓库，再重新运行组合安装器，让新的 systemd/OpenRC 服务文件和兼容环境变量生效：
+
+```bash
+cd /opt/argo-fanout
+git pull --ff-only
+bash install.sh
+```
+
+如果 `/opt/argo-fanout` 不存在：
+
+```bash
+git clone https://github.com/liu200320/argo-fanout.git /opt/argo-fanout
+cd /opt/argo-fanout
+bash install.sh
+```
+
+查看当前代码版本：
+
+```bash
+cd /opt/argo-fanout
+git log -1 --oneline
+```
+
+当前 GitHub `main` 分支包含 sing-box 1.12 兼容修复。安装过程中应看到：
+
+```text
+使用仓库附带的 fanout 二进制
+fanout 二进制一致性校验通过
+```
+
+升级后验证服务环境：
+
+```bash
+systemctl show fanout -p Environment 2>/dev/null || true
+ps aux | grep '[f]anout'
+```
+
+环境中应包含：
+
+```text
+ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
+```
+
+更新不会自动改变已有的 UUID、WebSocket 路径或 Cloudflare 临时域名；但重新执行安装器时，
+请保存安装输出中的节点信息，并确认 fanout Web 端口没有与其他服务冲突。
+
 ---
 
 ## 💬 安装中：交互式配置
