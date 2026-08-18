@@ -177,11 +177,18 @@ bash install.sh
 
 配置完成后，脚本会显示汇总信息并等待你确认，按回车键开始安装。
 
-安装器会把 fanout 服务固定为以下后端参数，避免自动探测回退到 native/Xray：
+安装器会执行两层防护，避免误装官方 fanout 后回退到 native/Xray：
+
+1. 使用仓库 `bin/` 中包含 SBA 后端的定制二进制；即使 Git clone 后文件权限是 `0644`，
+   安装器也会主动执行 `chmod 755`，不会再因 `-x` 判断失败而下载官方旧版。
+2. 服务启动参数固定为：
 
 ```text
 -panel sing-box-argo-lite
 ```
+
+安装后还会用 `cmp` 硬校验 `/usr/local/bin/fanout` 与仓库定制二进制完全一致；
+不一致时直接停止安装，不会带着错误版本继续启动。
 
 安装完成后可以确认：
 
@@ -348,7 +355,11 @@ curl -I http://127.0.0.1:8899
 节点链接后端暂不可用: 找不到 xray 可执行文件
 ```
 
-说明 fanout 仍按 native 模式启动，没有使用 sing-box-argo-lite。检查：
+说明 fanout 仍按 native 模式启动，没有使用 sing-box-argo-lite。历史版本出现该问题的根因是：
+GitHub clone 把仓库二进制检出成 `0644`，旧安装器用 `-x` 判断后误认为定制二进制不存在，
+继而下载了不含 SBA 后端的官方 fanout。最新版安装器已经修复并增加二进制一致性校验。
+
+检查：
 
 ```bash
 cat /var/lib/fanout/panel_mode
@@ -370,9 +381,17 @@ rc-service fanout restart
 tail -n 30 /var/log/fanout.log
 ```
 
-systemd 系统则重新从最新仓库安装，安装器会自动把 `-panel sing-box-argo-lite`
-写入服务文件。不要为了这个问题给 NAT 机器额外安装 Xray；本组合应该使用
-sing-box-argo-lite 后端。
+推荐所有系统直接更新仓库并重新运行最新版一键安装器：
+
+```bash
+cd /opt/argo-fanout
+git pull
+bash install.sh
+```
+
+最新版会自动修复二进制权限、禁止回退官方版本、校验安装结果，并把
+`-panel sing-box-argo-lite` 写入 systemd/OpenRC 服务。不要为了这个问题给 NAT 机器
+额外安装 Xray；本组合应该使用 sing-box-argo-lite 后端。
 
 ### Q4: 节点能连上但无法上网
 

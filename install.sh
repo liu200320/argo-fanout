@@ -222,12 +222,17 @@ EOF
   log_step "正在安装 fanout"
   
   local fo_bin_src="${ARGO_FANOUT_ROOT}/bin/fanout-linux-${GOARCH}"
-  if [ -x "$fo_bin_src" ]; then
-    log_info "找到随仓库附带的二进制 (${GOARCH})，无需编译。"
-    export FANOUT_PREBUILT="$fo_bin_src"
-  else
-    log_warn "未找到对应架构的预编译二进制，将触发源码编译 (需要服务器有 Go 环境)。"
+  if [ ! -f "$fo_bin_src" ]; then
+    log_err "仓库缺少 ${GOARCH} 预编译 fanout：$fo_bin_src"
+    log_err "为避免误装不含 sing-box-argo-lite 后端的官方版本，安装已停止。"
+    exit 1
   fi
+
+  # GitHub clone 可能把二进制检出成 0644。旧逻辑用 -x 判断时会误认为文件不存在，
+  # 然后回退下载官方 fanout；官方版本没有 SBA 后端，最终会错误地寻找 Xray。
+  chmod 755 "$fo_bin_src"
+  log_info "使用仓库附带的 fanout 二进制 (${GOARCH})。"
+  export FANOUT_PREBUILT="$fo_bin_src"
   
   export WEB_PORT="$FO_WEB_PORT"
   export FANOUT_PANEL_MODE="sing-box-argo-lite"
@@ -235,7 +240,14 @@ EOF
   pushd "${ARGO_FANOUT_ROOT}/vendor/fanout" >/dev/null
   bash install.sh
   popd >/dev/null
-  
+
+  # 硬校验实际安装的文件就是仓库附带的 SBA 定制版，防止未来再次意外回退官方版。
+  if [ ! -f /usr/local/bin/fanout ] || ! cmp -s "$fo_bin_src" /usr/local/bin/fanout; then
+    log_err "fanout 二进制安装校验失败：/usr/local/bin/fanout 与仓库定制版不一致"
+    log_err "安装已停止，请勿继续启动服务。"
+    exit 1
+  fi
+  log_info "fanout 二进制一致性校验通过"
   log_info "fanout 安装完成"
   
   # --- 绑定与重启 ---

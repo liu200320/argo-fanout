@@ -171,10 +171,13 @@ case "$ARCH" in
   *) echo "      不支持的架构: $ARCH" >&2; exit 1 ;;
 esac
 
-if [[ -n "${FANOUT_PREBUILT:-}" && -x "${FANOUT_PREBUILT}" ]]; then
-  # 上层安装器（如 argo-fanout）已经带了对应架构的二进制，直接用它。
-  # 这条分支存在的原因：官方 release 里没有第三方新增的后端，
-  # 一旦回落到下载预编译版就会把带新后端的二进制换掉。
+if [[ -n "${FANOUT_PREBUILT:-}" ]]; then
+  # 上层安装器（如 argo-fanout）明确指定了定制二进制时，绝不能静默回退官方版。
+  # Git clone 可能检出为 0644，所以这里只检查普通文件，install -m 755 负责权限。
+  if [[ ! -f "${FANOUT_PREBUILT}" ]]; then
+    echo "      指定的 fanout 二进制不存在: ${FANOUT_PREBUILT}" >&2
+    exit 1
+  fi
   echo "      使用随仓库附带的二进制"
   install -m 755 "${FANOUT_PREBUILT}" "$BIN"
 elif [[ -f main.go ]] && command -v go >/dev/null; then

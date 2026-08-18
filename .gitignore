@@ -1,4 +1,4 @@
-# 敏感文件
+# Sensitive local configuration
 *.conf
 !*.conf.example
 *.key
@@ -8,27 +8,25 @@
 *secret*
 *password*
 
-# 运行时文件
+# Runtime files
 *.log
 *.pid
 state.json
 config.json
 
-# 编译产物（如果本地编译过）
-fanout
+# Local build artifacts
+/fanout
 *.tar.gz
 *.zip
+vendor/fanout/dist/
 
-# 编辑器
+# Editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# 系统文件
+# Operating system files
 .DS_Store
 Thumbs.db
-
-# vendor �ڵı��������� bin/ ���У�
-vendor/fanout/dist/
