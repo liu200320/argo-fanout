@@ -27,7 +27,58 @@
 | **内核** | 支持 TUN 设备、网络命名空间 | 4.19+ |
 | **权限** | root | root |
 
-### 2. 网络要求
+### 2. 必须先安装 git（在线一键安装必需）
+
+`bash <(curl ...)` 在线运行时，脚本会先把仓库 clone 到 `/opt/argo-fanout` 再继续，
+**没有 git 会直接失败**。各系统安装命令：
+
+```bash
+# Debian / Ubuntu
+apt update && apt install -y git
+
+# CentOS / RHEL / Fedora
+yum install -y git          # 或 dnf install -y git
+
+# Alpine（注意：默认没有 bash，必须一起装）
+apk add git bash
+
+# Arch / Manjaro
+pacman -S --noconfirm git
+
+# openSUSE
+zypper --non-interactive install git
+```
+
+> **Alpine 特别提醒**：默认 shell 是 ash，`bash <(curl ...)` 这种进程替换语法需要 bash，
+> 所以除了 git 还必须装 bash，然后用 `bash` 而不是 `sh` 执行命令。
+
+装完验证：
+
+```bash
+git --version
+```
+
+### 3. 环境自查
+
+安装脚本会自动检查这三项，不过你也可以先手动确认，省得装到一半才报错：
+
+```bash
+# ① root 权限（必须是 0）
+id -u
+# 期望输出: 0
+
+# ② TUN 设备（fanout 建 VPN 隧道必需）
+[ -c /dev/net/tun ] && echo "✅ TUN 可用" || echo "❌ TUN 不可用，请找主机商开启"
+
+# ③ 架构（只支持 amd64 / arm64）
+uname -m
+# 期望输出: x86_64 或 aarch64
+```
+
+如果 `②` 显示不可用，你的机器大概率是 OpenVZ / LXC 容器，需要联系主机商
+**开启 TUN/TAP 设备和网络命名空间**，否则 fanout 无法创建出口隧道。
+
+### 4. 网络要求
 
 - ✅ 能访问 GitHub（用于下载源码和依赖）
 - ✅ 能访问 Cloudflare API（用于建立 Argo 隧道）
@@ -35,7 +86,7 @@
 
 如果服务器在国内，建议先配置 GitHub 代理或使用镜像加速。
 
-### 3. 可选准备
+### 5. 可选准备
 
 #### 如果要发布订阅到 GitHub Gist（推荐）
 
@@ -104,6 +155,31 @@ bash install.sh
 ---
 
 ## ✅ 安装后：使用与管理
+
+### 0. 放行防火墙端口（装完第一件事）
+
+安装脚本**不会自动开防火墙**。装完 Web 面板连不上，先检查这里。
+
+fanout Web 面板默认端口是 **8899**（安装时可改）：
+
+```bash
+# Debian / Ubuntu（ufw）
+ufw allow 8899/tcp
+
+# 或者直接用 iptables（通用）
+iptables -I INPUT -p tcp --dport 8899 -j ACCEPT
+
+# firewalld（CentOS / RHEL 8+）
+firewall-cmd --permanent --add-port=8899/tcp && firewall-cmd --reload
+```
+
+> **云服务器还要过厂商安全组**：腾讯云 / 阿里云 / AWS / Vultr 等在系统防火墙之外
+> 还有一层控制台安全组，8080/8899 这类端口默认是关的，需要去控制台
+> 「安全组 → 入站规则」里放行 TCP 8899。
+>
+> **安全建议**：面板是公网控制入口，虽然自带随机路径和随机口令，更稳妥的做法是
+> 安全组只对你的家庭 IP 放行；或者不对外放行，改为 SSH 隧道访问：
+> `ssh -L 8899:127.0.0.1:8899 root@你的服务器` 后浏览器开 `http://127.0.0.1:8899`。
 
 ### 1. 获取节点信息
 

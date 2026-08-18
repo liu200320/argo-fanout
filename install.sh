@@ -75,7 +75,16 @@ bootstrap() {
   if [ ! -d "${SCRIPT_DIR}/vendor/fanout" ]; then
     log_info "检测到在线运行，准备下载源码..."
     if ! command -v git >/dev/null 2>&1; then
-      log_err "未找到 git，请先安装 git 后重试"
+      log_err "未找到 git，在线安装必须先把仓库 clone 到本地"
+      log_err ""
+      log_err "请按你的系统安装 git 后重试："
+      log_err "  Debian/Ubuntu : apt update && apt install -y git"
+      log_err "  CentOS/RHEL   : yum install -y git   (或 dnf install -y git)"
+      log_err "  Alpine        : apk add git bash    (必须连 bash 一起装)"
+      log_err "  Arch/Manjaro  : pacman -S --noconfirm git"
+      log_err "  openSUSE      : zypper --non-interactive install git"
+      log_err ""
+      log_err "也可以改用本地安装：git clone 后进入仓库目录跑 bash install.sh"
       exit 1
     fi
     
