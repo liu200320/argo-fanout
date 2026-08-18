@@ -1,0 +1,295 @@
+# argo-fanout
+
+**一键部署 sing-box-argo-lite + fanout VPNGate 出口分流系统**
+
+这个项目将两个开源工具整合到一个交互式安装脚本中：
+- **sing-box-argo-lite**：通过 Cloudflare Argo 隧道提供无需公网 IP 的 VLESS 入站节点
+- **fanout**：自动从 VPN Gate 获取免费出口节点，并将入站流量按出口分流
+
+组合后你可以获得：
+- 📡 **零配置入站**：Cloudflare 自动分配域名，无需开放端口
+- 🌍 **多国出口**：从日本、韩国、美国等 VPN Gate 节点中选择出口
+- 🎛️ **图形化管理**：Web 界面一键切换出口，实时查看隧道状态
+- 🔒 **无日志风险**：入站和出站都在你自己的服务器上中转
+
+---
+
+## 📋 安装前准备
+
+### 1. 服务器要求
+
+| 项目 | 最低要求 | 推荐配置 |
+|------|---------|---------|
+| **CPU** | 1 核 | 2 核 |
+| **内存** | 512 MB | 1 GB |
+| **系统** | Debian 10+ / Ubuntu 20.04+ / Alpine 3.17+ | Debian 12 / Ubuntu 22.04 |
+| **架构** | amd64 / arm64 | amd64 |
+| **内核** | 支持 TUN 设备、网络命名空间 | 4.19+ |
+| **权限** | root | root |
+
+### 2. 网络要求
+
+- ✅ 能访问 GitHub（用于下载源码和依赖）
+- ✅ 能访问 Cloudflare API（用于建立 Argo 隧道）
+- ✅ 能访问 VPN Gate API（用于获取出口节点列表）
+
+如果服务器在国内，建议先配置 GitHub 代理或使用镜像加速。
+
+### 3. 可选准备
+
+#### 如果要发布订阅到 GitHub Gist（推荐）
+
+1. 登录 [GitHub](https://github.com)
+2. 进入 **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)**
+3. 点击 **Generate new token** → **Generate new token (classic)**
+4. 勾选 `gist` 权限，生成 Token 并保存（只显示一次）
+
+#### 如果服务器在 OpenVZ / LXC 容器中
+
+联系主机商**开启 TUN/TAP 设备**和**网络命名空间**支持，否则 fanout 无法创建出口隧道。
+
+验证方法：
+```bash
+# 检查 TUN 设备
+[ -c /dev/net/tun ] && echo "✅ TUN 设备可用" || echo "❌ TUN 设备不可用"
+
+# 检查网络命名空间
+unshare -n true 2>/dev/null && echo "✅ netns 可用" || echo "❌ netns 不可用"
+```
+
+---
+
+## 🚀 一键安装
+
+### 在线安装（推荐）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/liu200320/argo-fanout/main/install.sh)
+```
+
+### 本地安装
+
+```bash
+git clone https://github.com/liu200320/argo-fanout.git
+cd argo-fanout
+bash install.sh
+```
+
+---
+
+## 💬 安装中：交互式配置
+
+安装脚本会依次询问以下参数：
+
+### sing-box-argo-lite 配置
+
+| 参数 | 说明 | 默认值 | 示例 |
+|------|------|--------|------|
+| **运行用户** | 运行 sing-box 的系统用户 | `root` | `root` 或 `sbuser` |
+| **本地监听端口** | sing-box 监听的端口（fanout 会连接此端口） | `40001` | `40001` |
+| **UUID** | VLESS 协议的用户 ID | 自动生成 | `12345678-1234-...` |
+| **WebSocket 路径** | WS 传输的 URL 路径 | 自动生成 | `/ws-abc123` |
+| **订阅节点名称** | 客户端显示的节点名 | `NAT-Argo-Fanout` | `香港-Argo` |
+| **是否发布 Gist** | 是否将订阅链接发布到 GitHub Gist | `n` | `y` |
+| **GitHub Token** | 如果选 y，需要输入 Token（输入不显示） | 无 | `ghp_xxxx...` |
+
+### fanout 配置
+
+| 参数 | 说明 | 默认值 | 示例 |
+|------|------|--------|------|
+| **Web 管理端口** | fanout 管理面板的 HTTP 端口 | `8899` | `8899` |
+
+配置完成后，脚本会显示汇总信息并等待你确认，按回车键开始安装。
+
+---
+
+## ✅ 安装后：使用与管理
+
+### 1. 获取节点信息
+
+安装完成后，脚本会输出类似以下内容：
+
+```
+--- sing-box 节点信息 ---
+节点链接: vless://12345678-1234-...@xxx.trycloudflare.com:443?encryption=none&security=tls&type=ws&path=%2Fws-abc#NAT-Argo-Fanout
+
+订阅地址: https://gist.githubusercontent.com/liu200320/xxxx/raw/subscription.txt
+
+--- fanout 管理面板 ---
+管理地址:  http://123.45.67.89:8899/a1b2c3d4/
+访问口令:  xyz123
+终端命令:  输入 f 打开管理菜单
+```
+
+- **节点链接**：直接导入 v2rayN / Clash / Surge 等客户端
+- **订阅地址**：在客户端中添加订阅（需要启用了 Gist）
+- **管理地址**：浏览器访问，用于管理出口节点
+- **访问口令**：登录管理面板时输入
+
+### 2. 配置出口节点
+
+1. 用浏览器打开 **管理地址**，输入**访问口令**登录
+2. 点击页面上的 **"新建出口"** 或 **"从 VPN Gate 导入"**
+3. 选择一个延迟较低的节点（通常日本、韩国节点速度较快）
+4. 等待隧道建立完成（状态变为绿色 ✅）
+5. 在 **"入站管理"** 中找到 `vless-ws` 入站，点击右侧的 **"绑定出口"**
+6. 选择刚才建好的出口，点击 **"保存"**
+
+### 3. 客户端连接
+
+- 把步骤 1 中的**节点链接**复制到代理客户端（v2rayN / Clash / Surge 等）
+- 或者添加**订阅地址**并更新订阅（如果启用了 Gist）
+- 连接节点后，你的流量路径是：
+
+  ```
+  你的设备 → Cloudflare CDN → 你的服务器 sing-box → fanout → VPN Gate 出口 → 目标网站
+  ```
+
+### 4. 日常管理命令
+
+在服务器终端输入以下命令管理服务：
+
+#### fanout 管理菜单
+```bash
+f
+```
+进入交互式菜单，可以：
+- 查看当前隧道状态
+- 切换出口节点
+- 修改 Web 面板端口 / 访问口令
+- 重启 / 停止服务
+
+#### sing-box-argo 命令
+```bash
+# 查看节点信息（包括链接和订阅地址）
+sb-argo show
+
+# 查看服务状态
+sb-argo status
+
+# 重启服务
+sb-argo restart
+
+# 查看日志
+sb-argo logs
+
+# 停止服务
+sb-argo stop
+
+# 更新到最新版
+sb-argo update
+```
+
+#### systemd 服务管理
+```bash
+# fanout 服务
+systemctl status fanout
+systemctl restart fanout
+systemctl stop fanout
+
+# sing-box-argo 服务（如果用 root 用户安装）
+systemctl status sb-argo
+systemctl restart sb-argo
+```
+
+---
+
+## 🔧 常见问题
+
+### Q1: 安装时提示 "缺少 /dev/net/tun 设备"
+
+**原因**：你的服务器是 OpenVZ / LXC 容器，且主机商未开启 TUN 设备。
+
+**解决**：联系主机商工单请求开启 TUN/TAP，或更换为 KVM 虚拟化的 VPS。
+
+### Q2: fanout 面板无法访问
+
+**检查清单**：
+1. 确认防火墙已放行端口：`ufw allow 8899` 或 `iptables -I INPUT -p tcp --dport 8899 -j ACCEPT`
+2. 确认服务运行正常：`systemctl status fanout`
+3. 确认访问的 IP 和端口正确：`curl -I http://127.0.0.1:8899`
+
+### Q3: 节点能连上但无法上网
+
+**原因**：入站未绑定出口，或出口隧道未建立成功。
+
+**解决**：
+1. 登录 fanout 面板，查看出口状态是否为 ✅
+2. 如果出口是红色 ❌，尝试删除重建或换一个节点
+3. 确认入站已绑定到出口：在"入站管理"中检查 `vless-ws` 的出口字段
+
+### Q4: Gist 订阅无法更新
+
+**原因**：GitHub Token 权限不足或已过期。
+
+**解决**：
+1. 重新生成 Token（确保勾选 `gist` 权限）
+2. 编辑 `~/.config/sb-argo/secrets.conf`，更新 `GITHUB_TOKEN`
+3. 重启 sing-box：`sb-argo restart`
+
+### Q5: 想换一个出口节点
+
+**方法 1**（推荐）：
+1. 登录 fanout 面板
+2. 点击"新建出口"，选择新节点
+3. 在"入站管理"中将 `vless-ws` 重新绑定到新出口
+4. 旧出口不用了可以删除
+
+**方法 2**（终端）：
+```bash
+f  # 打开菜单
+# 选择 "切换出口节点"
+```
+
+---
+
+## 🗑️ 卸载
+
+```bash
+cd /opt/argo-fanout
+bash uninstall.sh
+```
+
+卸载脚本会询问你要删除哪些组件：
+1. 仅卸载 fanout（保留 sing-box-argo-lite）
+2. 仅卸载 sing-box-argo-lite（保留 fanout）
+3. 完全卸载（删除所有组件）
+
+---
+
+## 📦 项目结构
+
+```
+argo-fanout/
+├── install.sh              # 主安装脚本
+├── uninstall.sh            # 卸载脚本
+├── README.md               # 本文档
+├── bin/                    # 预编译的 fanout 二进制
+│   ├── fanout-linux-amd64
+│   └── fanout-linux-arm64
+└── vendor/                 # 子项目源码
+    ├── fanout/             # fanout 完整源码（含 sing-box-argo-lite 后端）
+    └── sing-box-argo-lite/ # sing-box-argo-lite 安装器
+```
+
+---
+
+## 🙏 致谢
+
+- sing-box-argo-lite - 无 root 部署的 sing-box + Argo 隧道方案
+- [fanout](https://github.com/byJoey/fanout) - VPN Gate 多出口网关
+- [VPN Gate](https://www.vpngate.net/) - 提供免费的公益 VPN 节点
+
+---
+
+## 📄 许可证
+
+本项目遵循 MIT 许可证。子项目的许可证请参考对应目录下的 LICENSE 文件。
+
+---
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+如果这个项目对你有帮助，请给个 ⭐ Star 支持一下～

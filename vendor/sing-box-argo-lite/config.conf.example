@@ -1,0 +1,38 @@
+# 无 root 用户可监听的本地端口
+LOCAL_PORT='40001'
+
+# 留空则首次安装自动生成，并在重启时保持不变
+UUID=''
+WS_PATH=''
+
+# 建议只使用 ASCII，避免分享链接名称编码差异
+NODE_NAME='NAT-Argo-VLESS-WS-TLS'
+
+# true: 发布到 GitHub Gist，得到稳定在线订阅地址
+# false: 只生成本地 subscription.txt
+SUBSCRIBE='true'
+
+# false 创建 Secret Gist；知道链接的人仍然可以读取
+GIST_PUBLIC='false'
+
+# 首次安装留空，脚本自动创建
+GIST_ID=''
+GIST_OWNER=''
+
+# 不要把 GITHUB_TOKEN 写在这个文件中并上传 GitHub
+# 首次安装时脚本会安全询问，并保存在服务器本地
+GITHUB_TOKEN=''
+
+# 尝试添加当前用户的 crontab @reboot 项
+ENABLE_CRON='true'
+
+# 64 MB 机器的 Go 堆软限制，不是进程 RSS 硬限制
+SB_MEMORY='18MiB'
+CF_MEMORY='24MiB'
+
+# GitHub 下载代理，例如 https://ghproxy.net/
+# 网络正常时保持为空
+GH_PROXY=''
+
+# 留空自动获取最新稳定版
+SB_VERSION=''

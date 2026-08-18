@@ -1,0 +1,34 @@
+# 敏感文件
+*.conf
+!*.conf.example
+*.key
+*.pem
+*.env
+*token*
+*secret*
+*password*
+
+# 运行时文件
+*.log
+*.pid
+state.json
+config.json
+
+# 编译产物（如果本地编译过）
+fanout
+*.tar.gz
+*.zip
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# vendor �ڵı��������� bin/ ���У�
+vendor/fanout/dist/
