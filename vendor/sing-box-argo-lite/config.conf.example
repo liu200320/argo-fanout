@@ -30,6 +30,15 @@ ENABLE_CRON='true'
 # doctor 会拉起挂掉的进程，并在临时域名变化时自动刷新订阅
 ENABLE_DOCTOR='true'
 
+# true: 节点链接更新时自动推送到你的 Telegram（安装交互中可配置）
+# 留空=未配置（下次交互安装会询问）；false=明确不启用
+TG_NOTIFY=''
+
+# Telegram 接收消息的 Chat ID（安装交互中可自动获取或手动填写）
+TG_CHAT_ID=''
+# Bot Token 保存在服务器本地 secrets.conf（与 GITHUB_TOKEN 同文件），
+# 不要写进本文件或提交到 GitHub
+
 # 64 MB 机器的 Go 堆软限制，不是进程 RSS 硬限制
 SB_MEMORY='18MiB'
 CF_MEMORY='24MiB'

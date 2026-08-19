@@ -195,6 +195,30 @@ collect_params() {
     fi
   fi
   echo
+
+  ask "是否启用 Telegram 节点推送？(y/n，节点链接更新时自动发给你的 bot)" "n" SB_TG
+  SB_TG_TOKEN=""
+  SB_TG_CHAT=""
+  if [ "$SB_TG" = "y" ]; then
+    printf "${BOLD}请输入 Telegram Bot Token（@BotFather 创建，输入不显示）: ${NC}"
+    if [ -t 0 ]; then
+      read -rs SB_TG_TOKEN
+    else
+      read -rs SB_TG_TOKEN </dev/tty
+    fi
+    echo
+    if [ -z "$SB_TG_TOKEN" ]; then
+      log_warn "未输入 Token，将跳过 Telegram 推送"
+      SB_TG="n"
+    else
+      ask "发给 Bot 后，你的 Chat ID（@userinfobot 发 /start 可查）" "" SB_TG_CHAT
+      if [ -z "$SB_TG_CHAT" ]; then
+        log_warn "未输入 Chat ID，将跳过 Telegram 推送"
+        SB_TG="n"
+      fi
+    fi
+  fi
+  echo
   
   # === fanout 配置 ===
   printf "${BLUE}--- fanout 配置 ---${NC}\n"
@@ -231,7 +255,10 @@ install_components() {
   # 转换 y/n 为 true/false
   local subscribe_bool="false"
   [ "$SB_SUBSCRIBE" = "y" ] && subscribe_bool="true"
-  
+
+  local tg_notify_bool="false"
+  [ "$SB_TG" = "y" ] && tg_notify_bool="true"
+
   cat > "$conf_file" <<EOF
 LOCAL_PORT=$(printf '%q' "$SB_PORT")
 UUID=$(printf '%q' "$SB_UUID")
@@ -241,13 +268,16 @@ SUBSCRIBE=$(printf '%q' "$subscribe_bool")
 ENABLE_CRON='true'
 SB_MEMORY='18MiB'
 CF_MEMORY='24MiB'
+TG_NOTIFY=$(printf '%q' "$tg_notify_bool")
+TG_CHAT_ID=$(printf '%q' "$SB_TG_CHAT")
 EOF
   
-  # 如果有 Token，写入 secrets.conf
-  if [ -n "$SB_TOKEN" ]; then
-    cat > "${sb_conf_dir}/secrets.conf" <<EOF
-GITHUB_TOKEN=$(printf '%q' "$SB_TOKEN")
-EOF
+  # 如有 Token，写入 secrets.conf（GITHUB_TOKEN / TG_BOT_TOKEN 可同时存在，互不覆盖）
+  if [ -n "$SB_TOKEN" ] || [ -n "$SB_TG_TOKEN" ]; then
+    {
+      [ -n "$SB_TOKEN" ] && printf 'GITHUB_TOKEN=%s\n' "$(printf '%q' "$SB_TOKEN")"
+      [ -n "$SB_TG_TOKEN" ] && printf 'TG_BOT_TOKEN=%s\n' "$(printf '%q' "$SB_TG_TOKEN")"
+    } > "${sb_conf_dir}/secrets.conf"
     chmod 600 "${sb_conf_dir}/secrets.conf"
     chown "$SB_USER:" "${sb_conf_dir}/secrets.conf"
   fi
@@ -353,6 +383,12 @@ print_summary() {
     echo
   else
     log_warn "未找到节点信息文件，请稍后运行: sb-argo show"
+  fi
+
+  if [ "$SB_TG" = "y" ]; then
+    printf "${BLUE}--- Telegram 节点推送 ---${NC}\n"
+    echo "已启用：节点链接更新时会自动发送到你的 Telegram。验证: sb-argo tg-test"
+    echo
   fi
   
   printf "${BLUE}--- fanout 管理面板 ---${NC}\n"

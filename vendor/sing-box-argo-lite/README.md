@@ -55,6 +55,30 @@ bash <(wget -qO- \
 
 临时 Argo 域名改变后，脚本会更新同一个 Gist，因此订阅 URL 保持不变。GitHub Raw 缓存可能导致更新延迟数分钟。
 
+## Telegram 节点推送
+
+节点链接每次更新（安装完成、`sb-argo restart`、doctor 自愈后发现域名变化）都会自动发送到你的 Telegram，省去反复 `sb-argo show`。
+
+安装时交互询问是否启用（需输入 Bot Token 和 Chat ID）；也可以直接写入配置文件：
+
+```text
+~/.config/sb-argo/config.conf     TG_NOTIFY='true'  TG_CHAT_ID='你的ID'
+~/.config/sb-argo/secrets.conf    TG_BOT_TOKEN='你的Token'
+```
+
+获取方式：
+
+- **Bot Token**：在 Telegram 联系 [@BotFather](https://t.me/BotFather)，`/newbot` 创建机器人，复制给出的 token。
+- **Chat ID**：先给你的 bot 发一条消息（如 `/start`），再用 [@userinfobot](https://t.me/userinfobot) 发任意消息查询你的数字 ID。安装交互中也可自动获取。
+
+验证推送：
+
+```bash
+sb-argo tg-test
+```
+
+注意：发送走 `api.telegram.org`，国内网络如果不通需要自行配置代理；Token 明文保存在本地 `secrets.conf`（chmod 600），不要分享给别人。
+
 ## 管理命令
 
 ```bash
@@ -65,6 +89,7 @@ sb-argo logs
 sb-argo stop
 sb-argo update
 sb-argo doctor
+sb-argo tg-test      # 测试 Telegram 节点推送
 sb-argo uninstall
 ```
 

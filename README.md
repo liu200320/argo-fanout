@@ -258,6 +258,9 @@ ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
 | **订阅节点名称** | 客户端显示的节点名 | `NAT-Argo-Fanout` | `香港-Argo` |
 | **是否发布 Gist** | 是否将订阅链接发布到 GitHub Gist | `n` | `y` |
 | **GitHub Token** | 如果选 y，需要输入 Token（输入不显示） | 无 | `ghp_xxxx...` |
+| **是否启用 Telegram 推送** | 节点链接更新时自动发到你的 Telegram | `n` | `y` |
+| **Telegram Bot Token** | 如果选 y，输入 @BotFather 创建的 Token（输入不显示） | 无 | `123456:ABC-...` |
+| **Telegram Chat ID** | 你的用户 ID（@userinfobot 发 /start 可查） | 无 | `987654321` |
 
 ### fanout 配置
 
@@ -360,6 +363,30 @@ cat ~/.local/share/sb-argo/state/node-info.txt
 > 客户端里的旧链接会失效，需要重新 `sb-argo show` 取新链接。
 > 本项目的 **doctor 自愈**（见下）会自动处理这种情况。
 
+#### Telegram 节点推送
+
+安装时选择启用后，**每次节点链接更新**（安装完成、`sb-argo restart`、doctor 自愈发现
+域名变化）都会自动把新的 `vless://` 链接发送到你的 Telegram，不用再回服务器查链接。
+链接没变化时不会打扰你。
+
+配置保存在：
+- `~/.config/sb-argo/config.conf` → `TG_NOTIFY` / `TG_CHAT_ID`
+- `~/.config/sb-argo/secrets.conf` → `TG_BOT_TOKEN`（chmod 600，与 GitHub Token 同文件）
+
+获取方式：
+1. Telegram 联系 [@BotFather](https://t.me/BotFather)，`/newbot` 创建机器人拿 Token；
+2. 给你的 bot 发一条消息（如 `/start`），再用 [@userinfobot](https://t.me/userinfobot)
+   查询你的数字 Chat ID。
+
+验证推送：
+
+```bash
+sb-argo tg-test
+```
+
+> 注意：推送走 `api.telegram.org`，国内网络不通时需要给服务器配置代理；
+> Token 明文保存在服务器本地，不要分享给别人。
+
 ### 2. 配置出口节点
 
 1. 用浏览器打开 **管理地址**，输入**访问口令**登录
@@ -415,6 +442,9 @@ sb-argo update
 
 # 自愈：进程挂掉自动拉起、临时域名变化自动刷新订阅
 sb-argo doctor
+
+# 测试 Telegram 节点推送
+sb-argo tg-test
 ```
 
 #### 开机自启与定期自愈

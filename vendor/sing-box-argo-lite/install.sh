@@ -29,7 +29,7 @@ CONF_SOURCE=""
 usage() {
   cat <<'EOF'
 用法:
-  install.sh [-f 配置文件或URL] [install|start|restart|stop|status|show|logs|doctor|update|uninstall]
+  install.sh [-f 配置文件或URL] [install|start|restart|stop|status|show|logs|doctor|update|tg-test|uninstall]
 
 示例:
   bash install.sh
@@ -37,6 +37,7 @@ usage() {
   sb-argo show
   sb-argo restart
   sb-argo doctor    # 自愈：进程掉了自动拉起，域名变了自动刷新订阅
+  sb-argo tg-test   # 测试 Telegram 节点推送配置
 EOF
 }
 
@@ -50,7 +51,7 @@ while [ "$#" -gt 0 ]; do
       CONF_SOURCE="$2"
       shift 2
       ;;
-    install|start|restart|stop|status|show|logs|doctor|update|uninstall)
+    install|start|restart|stop|status|show|logs|doctor|update|tg-test|uninstall)
       ACTION="$1"
       shift
       ;;
@@ -87,6 +88,13 @@ ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS="${ENABLE_DEPRECATED_LEGACY_DOM
 # 自愈：等于 true 时安装器会添加 crontab，定期执行 sb-argo doctor。
 # doctor 发现 sing-box 或 cloudflared 挂掉会自动拉起；临时域名变化时自动刷新订阅。
 ENABLE_DOCTOR="${ENABLE_DOCTOR:-true}"
+
+# Telegram 节点推送：等于 true 时，每次节点链接更新后自动发到你的 Telegram。
+# 安装交互中会询问 Bot Token / Chat ID；Token 保存在 secrets.conf（chmod 600）。
+# 留空表示未配置（下次交互安装会询问）；false 表示明确不启用（不再询问）。
+TG_NOTIFY="${TG_NOTIFY:-}"
+TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
+TG_CHAT_ID="${TG_CHAT_ID:-}"
 
 mkdir -p "$BIN_DIR" "$STATE_DIR" "$LOG_DIR" "$CONFIG_DIR" \
   "$(dirname "$MANAGER")"
@@ -207,6 +215,153 @@ show_status() {
   fi
 }
 
+# ── Telegram 节点推送 ─────────────────────────────────────────────
+
+# save_secret：安全写入 secrets.conf 中的单个键，不覆盖其他键。
+# 与 GITHUB_TOKEN 共用 secrets.conf，避免互相覆盖。
+save_secret() {
+  secret_key="$1"
+  secret_value="$2"
+
+  [ -f "$SECRET_CONFIG" ] || : >"$SECRET_CONFIG"
+  tmp="${SECRET_CONFIG}.tmp"
+  : >"$tmp"
+
+  while IFS= read -r line; do
+    case "$line" in
+      "${secret_key}="*) continue ;;
+    esac
+    printf '%s\n' "$line" >>"$tmp"
+  done <"$SECRET_CONFIG"
+
+  printf '%s=%s\n' \
+    "$secret_key" \
+    "$(printf '%q' "$secret_value")" >>"$tmp"
+
+  mv "$tmp" "$SECRET_CONFIG"
+  chmod 600 "$SECRET_CONFIG"
+}
+
+# tg_send：向已配置的 Telegram 发送一条消息；失败只警告，不中断主流程。
+# 需要服务器能访问 api.telegram.org（国内网络可能需要代理，见 README）。
+tg_send() {
+  tg_message="$1"
+
+  [ "$TG_NOTIFY" = "true" ] || return 0
+  [ -n "$TG_BOT_TOKEN" ] || return 0
+  [ -n "$TG_CHAT_ID" ] || return 0
+
+  command -v curl >/dev/null 2>&1 || {
+    printf '警告: Telegram 推送需要 curl\n' >&2
+    return 1
+  }
+
+  curl -fsS --max-time 15 \
+    --data-urlencode "chat_id=${TG_CHAT_ID}" \
+    --data-urlencode "text=${tg_message}" \
+    --data-urlencode "disable_web_page_preview=true" \
+    "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+    >/dev/null 2>&1
+}
+
+# tg_send_node：节点链接有变化时推送给用户；链接没变则不打扰。
+# 去重依据：state/tg-last-sent 里保存上次已发送的 VLESS_LINK。
+tg_send_node() {
+  [ "$TG_NOTIFY" = "true" ] || return 0
+  [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || return 0
+  [ -n "$VLESS_LINK" ] || return 0
+
+  last_sent="${STATE_DIR}/tg-last-sent"
+  if [ -s "$last_sent" ] && \
+     [ "$(cat "$last_sent" 2>/dev/null || true)" = "$VLESS_LINK" ]; then
+    return 0
+  fi
+
+  tg_message="🚀 sing-box-argo 节点已更新
+名称: ${NODE_NAME}
+地址: ${DOMAIN}:443
+时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+${VLESS_LINK}
+
+订阅: ${SUB_URL}"
+
+  if tg_send "$tg_message"; then
+    printf '%s\n' "$VLESS_LINK" >"$last_sent"
+    chmod 600 "$last_sent"
+    printf '已将新节点推送到 Telegram\n'
+  else
+    printf '警告: Telegram 推送失败（网络或配置问题，可用 sb-argo tg-test 检查）\n' >&2
+  fi
+}
+
+# ask_telegram：安装交互中询问 Telegram 配置并写入文件。
+# 仅交互式安装时调用；已配置或明确关闭时不再询问。
+ask_telegram() {
+  [ -t 0 ] || return 0
+  [ "$TG_NOTIFY" = "false" ] && return 0
+  [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] && return 0
+
+  printf '是否启用 Telegram 节点推送（节点链接更新时自动发给你）？[y/N] '
+  read -r tg_ans
+  case "$tg_ans" in
+    y|Y|yes|YES) ;;
+    *)
+      TG_NOTIFY=false
+      printf '已跳过 Telegram 配置（需要时重新运行安装即可再询问）\n'
+      return 0
+      ;;
+  esac
+
+  if [ -z "$TG_BOT_TOKEN" ]; then
+    printf '请输入 Telegram Bot Token（在 @BotFather 创建，输入不显示）: '
+    read -r -s TG_BOT_TOKEN
+    printf '\n'
+    [ -n "$TG_BOT_TOKEN" ] || {
+      printf '未输入 Token，跳过 Telegram 配置\n'
+      TG_NOTIFY=false
+      return 1
+    }
+    save_secret TG_BOT_TOKEN "$TG_BOT_TOKEN"
+  fi
+
+  if [ -z "$TG_CHAT_ID" ]; then
+    printf '请现在给这个 bot 发送任意一条消息（如 /start），脚本会自动获取你的 Chat ID...\n'
+    TG_CHAT_ID=""
+    for tg_i in 1 2 3 4 5 6; do
+      sleep 5
+      tg_updates="$(
+        curl -fsS --max-time 10 \
+          "https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates" \
+          2>/dev/null || true
+      )"
+      TG_CHAT_ID="$(
+        printf '%s' "$tg_updates" |
+        sed -n \
+          's/.*"chat":{[^{]*"id":\(-\{0,1\}[0-9]\{1,\}\).*/\1/p' |
+        tail -n 1
+      )"
+      [ -n "$TG_CHAT_ID" ] && break
+      printf '  （尚未收到消息，继续等待，最多 %s 秒）\n' "$(( (6 - tg_i) * 5 ))"
+    done
+
+    if [ -z "$TG_CHAT_ID" ]; then
+      printf '自动获取超时。请输入 Chat ID 手动填写（@userinfobot 发送 /start 可查）: '
+      read -r TG_CHAT_ID
+      [ -n "$TG_CHAT_ID" ] || {
+        printf '未输入 Chat ID，跳过 Telegram 配置\n'
+        TG_NOTIFY=false
+        return 1
+      }
+    fi
+  fi
+
+  TG_NOTIFY=true
+  save_secret TG_BOT_TOKEN "$TG_BOT_TOKEN"
+  printf '已保存 Telegram 配置，发送测试消息...\n'
+  tg_send "✅ 配置成功，sing-box-argo 节点推送已启用。之后节点链接更新会自动推送到这里。"
+}
+
 case "$ACTION" in
   stop)
     stop_all
@@ -227,6 +382,20 @@ case "$ACTION" in
     tail -n 40 "$SB_LOG" 2>/dev/null || true
     printf '%s\n' '----- cloudflared -----'
     tail -n 60 "$CF_LOG" 2>/dev/null || true
+    exit 0
+    ;;
+  tg-test)
+    if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+      if tg_send "🧪 测试消息：sing-box-argo Telegram 推送正常"; then
+        printf 'Telegram 推送成功\n'
+      else
+        printf 'Telegram 推送失败\n' >&2
+        exit 1
+      fi
+    else
+      printf '未配置 Telegram，请运行 bash install.sh（交互式安装）或在 %s 中手动添加\n' "$SECRET_CONFIG" >&2
+      exit 1
+    fi
     exit 0
     ;;
   uninstall)
@@ -369,6 +538,9 @@ fi
 
 install_manager
 
+# 仅在交互式安装时询问 Telegram 配置（-f 指定配置或非交互环境自动跳过）。
+[ "$ACTION" = "install" ] && ask_telegram
+
 if [ -z "$UUID" ]; then
   UUID="$("$SB_BIN" generate uuid)" || exit 1
 fi
@@ -439,6 +611,8 @@ GH_PROXY=$(printf '%q' "$GH_PROXY")
 SB_VERSION=$(printf '%q' "$SB_VERSION")
 ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=$(printf '%q' "$ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS")
 ENABLE_DOCTOR=$(printf '%q' "$ENABLE_DOCTOR")
+TG_NOTIFY=$(printf '%q' "$TG_NOTIFY")
+TG_CHAT_ID=$(printf '%q' "$TG_CHAT_ID")
 EOF
 
 chmod 600 "$SAVED_CONFIG"
@@ -479,6 +653,26 @@ start_singbox() {
     return 1
   fi
   return 0
+}
+
+# build_vless_link：用当前 DOMAIN 生成 VLESS 链接与本地订阅文件。
+# start_cloudflared 与 doctor 从日志恢复域名时都会调用。
+build_vless_link() {
+  ENCODED_PATH="$(
+    printf '%s' "$WS_PATH" |
+    sed 's|%|%25|g; s|/|%2F|g; s|?|%3F|g; s|#|%23|g'
+  )"
+
+  VLESS_LINK="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=${ENCODED_PATH}#${NODE_NAME}"
+
+  printf '%s\n' "$VLESS_LINK" |
+    base64 |
+    tr -d '\r\n' >"$SUB_FILE"
+
+  printf '\n' >>"$SUB_FILE"
+  chmod 600 "$SUB_FILE"
+
+  SUB_URL="未发布在线订阅"
 }
 
 # start_cloudflared：启动 cloudflared 并等待临时域名；域名写入全局 DOMAIN/VLESS_LINK。
@@ -531,21 +725,7 @@ start_cloudflared() {
     return 1
   fi
 
-  ENCODED_PATH="$(
-    printf '%s' "$WS_PATH" |
-    sed 's|%|%25|g; s|/|%2F|g; s|?|%3F|g; s|#|%23|g'
-  )"
-
-  VLESS_LINK="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=${ENCODED_PATH}#${NODE_NAME}"
-
-  printf '%s\n' "$VLESS_LINK" |
-    base64 |
-    tr -d '\r\n' >"$SUB_FILE"
-
-  printf '\n' >>"$SUB_FILE"
-  chmod 600 "$SUB_FILE"
-
-  SUB_URL="未发布在线订阅"
+  build_vless_link
   return 0
 }
 
@@ -580,6 +760,18 @@ if [ "$ACTION" = "install" ] || [ "$ACTION" = "restart" ] || [ "$ACTION" = "star
     [ "$need_cf" = true ] && printf 'cloudflared 未运行，正在拉起（临时域名会变化并自动刷新订阅）...\n'
     [ "$need_sb" = true ] && { start_singbox || exit 1; }
     [ "$need_cf" = true ] && { start_cloudflared || exit 1; }
+
+    # cloudflared 未重启时（只拉起了 sing-box），从日志恢复当前域名，
+    # 避免 node-info / 订阅被写成空地址。
+    if [ "$need_cf" = false ]; then
+      DOMAIN="$(
+        sed -n \
+          's|.*https://\([A-Za-z0-9-]*\.trycloudflare\.com\).*|\1|p' \
+          "$CF_LOG" |
+        tail -n 1
+      )"
+      [ -n "$DOMAIN" ] && build_vless_link
+    fi
   fi
 fi
 
@@ -600,10 +792,7 @@ publish_gist() {
     return 1
   }
 
-  cat >"$SECRET_CONFIG" <<EOF
-GITHUB_TOKEN=$(printf '%q' "$GITHUB_TOKEN")
-EOF
-  chmod 600 "$SECRET_CONFIG"
+  save_secret GITHUB_TOKEN "$GITHUB_TOKEN"
 
   sub_content="$(tr -d '\r\n' <"$SUB_FILE")"
   payload="${STATE_DIR}/gist-payload.json"
@@ -688,6 +877,9 @@ EOF
 
 chmod 600 "$NODE_FILE"
 
+# 节点链接更新后推送到 Telegram（已配置且链接有变化时才发送）
+tg_send_node
+
 if [ "$ENABLE_CRON" = "true" ] && command -v crontab >/dev/null 2>&1; then
   cron_boot="@reboot sleep 20; ${MANAGER} start >/dev/null 2>&1"
   cron_doctor="*/2 * * * * ${MANAGER} doctor >/dev/null 2>&1"
@@ -709,4 +901,5 @@ printf '  %s status\n' "$MANAGER"
 printf '  %s restart\n' "$MANAGER"
 printf '  %s logs\n' "$MANAGER"
 printf '  %s doctor\n' "$MANAGER"
+printf '  %s tg-test\n' "$MANAGER"
 printf '  %s stop\n' "$MANAGER"
