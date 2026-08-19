@@ -516,7 +516,7 @@ start_cloudflared() {
       sed -n \
         's|.*https://\([A-Za-z0-9-]*\.trycloudflare\.com\).*|\1|p' \
         "$CF_LOG" |
-      head -n 1
+      tail -n 1
     )"
 
     [ -n "$DOMAIN" ] && break
