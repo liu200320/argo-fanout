@@ -29,13 +29,14 @@ CONF_SOURCE=""
 usage() {
   cat <<'EOF'
 用法:
-  install.sh [-f 配置文件或URL] [install|start|restart|stop|status|show|logs|update|uninstall]
+  install.sh [-f 配置文件或URL] [install|start|restart|stop|status|show|logs|doctor|update|uninstall]
 
 示例:
   bash install.sh
   bash install.sh -f config.conf
   sb-argo show
   sb-argo restart
+  sb-argo doctor    # 自愈：进程掉了自动拉起，域名变了自动刷新订阅
 EOF
 }
 
@@ -49,7 +50,7 @@ while [ "$#" -gt 0 ]; do
       CONF_SOURCE="$2"
       shift 2
       ;;
-    install|start|restart|stop|status|show|logs|update|uninstall)
+    install|start|restart|stop|status|show|logs|doctor|update|uninstall)
       ACTION="$1"
       shift
       ;;
@@ -83,6 +84,9 @@ GH_PROXY="${GH_PROXY:-}"
 SB_VERSION="${SB_VERSION:-}"
 # sing-box 1.12 暂时兼容旧版 domain_strategy 配置；后续迁移配置后可移除。
 ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS="${ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS:-true}"
+# 自愈：等于 true 时安装器会添加 crontab，定期执行 sb-argo doctor。
+# doctor 发现 sing-box 或 cloudflared 挂掉会自动拉起；临时域名变化时自动刷新订阅。
+ENABLE_DOCTOR="${ENABLE_DOCTOR:-true}"
 
 mkdir -p "$BIN_DIR" "$STATE_DIR" "$LOG_DIR" "$CONFIG_DIR" \
   "$(dirname "$MANAGER")"
@@ -434,6 +438,7 @@ CF_MEMORY=$(printf '%q' "$CF_MEMORY")
 GH_PROXY=$(printf '%q' "$GH_PROXY")
 SB_VERSION=$(printf '%q' "$SB_VERSION")
 ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=$(printf '%q' "$ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS")
+ENABLE_DOCTOR=$(printf '%q' "$ENABLE_DOCTOR")
 EOF
 
 chmod 600 "$SAVED_CONFIG"
@@ -449,101 +454,134 @@ env \
     exit 1
   }
 
-if [ "$ACTION" = "start" ] &&
-   pid_running "$SB_PID_FILE" &&
-   pid_running "$CF_PID_FILE"; then
-  show_status
-  [ -s "$NODE_FILE" ] && cat "$NODE_FILE"
-  exit 0
-fi
+# ── 启动进程（standalone，供 install/restart/doctor 复用）───────────
 
-stop_all
-: >"$SB_LOG"
-: >"$CF_LOG"
+# start_singbox：只启动 sing-box，不影响 cloudflared，域名保持不变。
+start_singbox() {
+  printf '正在启动 sing-box...\n'
 
-printf '正在启动 sing-box...\n'
+  nohup env \
+    GOMAXPROCS=1 \
+    GOMEMLIMIT="$SB_MEMORY" \
+    GOGC=25 \
+    GODEBUG=madvdontneed=1 \
+    ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS="$ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" \
+    "$SB_BIN" run -c "$SB_CONFIG" \
+    </dev/null >>"$SB_LOG" 2>&1 &
 
-nohup env \
-  GOMAXPROCS=1 \
-  GOMEMLIMIT="$SB_MEMORY" \
-  GOGC=25 \
-  GODEBUG=madvdontneed=1 \
-  ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS="$ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" \
-  "$SB_BIN" run -c "$SB_CONFIG" \
-  </dev/null >>"$SB_LOG" 2>&1 &
+  printf '%s\n' "$!" >"$SB_PID_FILE"
 
-printf '%s\n' "$!" >"$SB_PID_FILE"
+  sleep 2
 
-sleep 2
+  if ! pid_running "$SB_PID_FILE"; then
+    tail -n 40 "$SB_LOG" >&2 || true
+    printf '错误: sing-box 启动失败，可能是内存不足\n' >&2
+    return 1
+  fi
+  return 0
+}
 
-if ! pid_running "$SB_PID_FILE"; then
-  tail -n 40 "$SB_LOG" >&2 || true
-  printf '错误: sing-box 启动失败，可能是内存不足\n' >&2
-  exit 1
-fi
+# start_cloudflared：启动 cloudflared 并等待临时域名；域名写入全局 DOMAIN/VLESS_LINK。
+# cloudflared 重启后 trycloudflare 域名会变化。
+start_cloudflared() {
+  printf '正在启动 Cloudflare 临时隧道...\n'
 
-printf '正在启动 Cloudflare 临时隧道...\n'
+  : >"${STATE_DIR}/cloudflared-empty.yml"
 
-: >"${STATE_DIR}/cloudflared-empty.yml"
+  nohup env \
+    GOMAXPROCS=1 \
+    GOMEMLIMIT="$CF_MEMORY" \
+    GOGC=25 \
+    GODEBUG=madvdontneed=1 \
+    "$CF_BIN" tunnel \
+      --config "${STATE_DIR}/cloudflared-empty.yml" \
+      --no-autoupdate \
+      --protocol http2 \
+      --url "http://127.0.0.1:${LOCAL_PORT}" \
+    </dev/null >>"$CF_LOG" 2>&1 &
 
-nohup env \
-  GOMAXPROCS=1 \
-  GOMEMLIMIT="$CF_MEMORY" \
-  GOGC=25 \
-  GODEBUG=madvdontneed=1 \
-  "$CF_BIN" tunnel \
-    --config "${STATE_DIR}/cloudflared-empty.yml" \
-    --no-autoupdate \
-    --protocol http2 \
-    --url "http://127.0.0.1:${LOCAL_PORT}" \
-  </dev/null >>"$CF_LOG" 2>&1 &
+  printf '%s\n' "$!" >"$CF_PID_FILE"
 
-printf '%s\n' "$!" >"$CF_PID_FILE"
+  DOMAIN=""
+  count=0
 
-DOMAIN=""
-count=0
+  while [ "$count" -lt 60 ]; do
+    if ! pid_running "$CF_PID_FILE"; then
+      tail -n 60 "$CF_LOG" >&2 || true
+      printf '错误: cloudflared 已退出\n' >&2
+      return 1
+    fi
 
-while [ "$count" -lt 60 ]; do
-  if ! pid_running "$CF_PID_FILE"; then
+    DOMAIN="$(
+      sed -n \
+        's|.*https://\([A-Za-z0-9-]*\.trycloudflare\.com\).*|\1|p' \
+        "$CF_LOG" |
+      head -n 1
+    )"
+
+    [ -n "$DOMAIN" ] && break
+
+    count=$((count + 1))
+    sleep 1
+  done
+
+  if [ -z "$DOMAIN" ]; then
     tail -n 60 "$CF_LOG" >&2 || true
-    printf '错误: cloudflared 已退出\n' >&2
-    exit 1
+    printf '错误: 60 秒内没有取得临时域名\n' >&2
+    return 1
   fi
 
-  DOMAIN="$(
-    sed -n \
-      's|.*https://\([A-Za-z0-9-]*\.trycloudflare\.com\).*|\1|p' \
-      "$CF_LOG" |
-    head -n 1
+  ENCODED_PATH="$(
+    printf '%s' "$WS_PATH" |
+    sed 's|%|%25|g; s|/|%2F|g; s|?|%3F|g; s|#|%23|g'
   )"
 
-  [ -n "$DOMAIN" ] && break
+  VLESS_LINK="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=${ENCODED_PATH}#${NODE_NAME}"
 
-  count=$((count + 1))
-  sleep 1
-done
+  printf '%s\n' "$VLESS_LINK" |
+    base64 |
+    tr -d '\r\n' >"$SUB_FILE"
 
-if [ -z "$DOMAIN" ]; then
-  tail -n 60 "$CF_LOG" >&2 || true
-  printf '错误: 60 秒内没有取得临时域名\n' >&2
-  exit 1
+  printf '\n' >>"$SUB_FILE"
+  chmod 600 "$SUB_FILE"
+
+  SUB_URL="未发布在线订阅"
+  return 0
+}
+
+if [ "$ACTION" = "install" ] || [ "$ACTION" = "restart" ] || [ "$ACTION" = "start" ] || [ "$ACTION" = "doctor" ]; then
+  need_sb=false
+  need_cf=false
+  pid_running "$SB_PID_FILE" || need_sb=true
+  pid_running "$CF_PID_FILE" || need_cf=true
+
+  # start：两个都在运行则直接显示状态并退出（不改动域名）。
+  # restart：整组重建。
+  # doctor：只拉起缺失的成员，尽量不动 cloudflared（避免域名变化）。
+  if [ "$ACTION" = "start" ] && [ "$need_sb" = false ] && [ "$need_cf" = false ]; then
+    show_status
+    [ -s "$NODE_FILE" ] && cat "$NODE_FILE"
+    exit 0
+  fi
+
+  if [ "$ACTION" = "install" ] || [ "$ACTION" = "restart" ]; then
+    stop_all
+    : >"$SB_LOG"
+    : >"$CF_LOG"
+    start_singbox || exit 1
+    start_cloudflared || exit 1
+  elif [ "$ACTION" = "doctor" ]; then
+    if [ "$need_sb" = false ] && [ "$need_cf" = false ]; then
+      printf 'sb-argo: 全部正常\n'
+      show_status
+      exit 0
+    fi
+    [ "$need_sb" = true ] && printf 'sing-box 未运行，正在拉起...\n'
+    [ "$need_cf" = true ] && printf 'cloudflared 未运行，正在拉起（临时域名会变化并自动刷新订阅）...\n'
+    [ "$need_sb" = true ] && { start_singbox || exit 1; }
+    [ "$need_cf" = true ] && { start_cloudflared || exit 1; }
+  fi
 fi
-
-ENCODED_PATH="$(
-  printf '%s' "$WS_PATH" |
-  sed 's|%|%25|g; s|/|%2F|g; s|?|%3F|g; s|#|%23|g'
-)"
-
-VLESS_LINK="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=${ENCODED_PATH}#${NODE_NAME}"
-
-printf '%s\n' "$VLESS_LINK" |
-  base64 |
-  tr -d '\r\n' >"$SUB_FILE"
-
-printf '\n' >>"$SUB_FILE"
-chmod 600 "$SUB_FILE"
-
-SUB_URL="未发布在线订阅"
 
 publish_gist() {
   command -v curl >/dev/null 2>&1 || {
@@ -651,12 +689,15 @@ EOF
 chmod 600 "$NODE_FILE"
 
 if [ "$ENABLE_CRON" = "true" ] && command -v crontab >/dev/null 2>&1; then
-  cron_line="@reboot sleep 20; ${MANAGER} start >/dev/null 2>&1"
+  cron_boot="@reboot sleep 20; ${MANAGER} start >/dev/null 2>&1"
+  cron_doctor="*/2 * * * * ${MANAGER} doctor >/dev/null 2>&1"
 
   {
     crontab -l 2>/dev/null |
-      grep -Fv "${MANAGER} start" || true
-    printf '%s\n' "$cron_line"
+      grep -Fv "${MANAGER} start" |
+      grep -Fv "${MANAGER} doctor" || true
+    printf '%s\n' "$cron_boot"
+    [ "$ENABLE_DOCTOR" = "true" ] && printf '%s\n' "$cron_doctor"
   } | crontab - 2>/dev/null || true
 fi
 
@@ -667,4 +708,5 @@ printf '  %s show\n' "$MANAGER"
 printf '  %s status\n' "$MANAGER"
 printf '  %s restart\n' "$MANAGER"
 printf '  %s logs\n' "$MANAGER"
+printf '  %s doctor\n' "$MANAGER"
 printf '  %s stop\n' "$MANAGER"
