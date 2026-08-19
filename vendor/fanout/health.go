@@ -17,7 +17,8 @@ const (
 
 // WatchHealth 周期检查每条隧道是否还能出网，掉线的自动换节点重连。
 // VPN Gate 是志愿者节点，运行中掉线很常见。
-// 判掉线时会发一条 Telegram 提醒；每条隧道掉线只提醒一次，恢复后再掉线才重新提醒。
+// 判掉线时会把绑在该隧道上的入站解绑回直连（保证节点仍可用），并推送 Telegram 提醒；
+// 每条隧道掉线只提醒一次，恢复后重新绑定回 SOCKS5 出口再提醒一次。
 func (m *Manager) WatchHealth() {
 	fails := map[int]int{}
 	notified := map[int]bool{}
@@ -28,8 +29,12 @@ func (m *Manager) WatchHealth() {
 				continue
 			}
 			if m.tunnelHealthy(t) {
+				// 之前掉线通知过且隧道已恢复：把入站重新绑回 SOCKS5 出口
+				if notified[t.Slot] {
+					m.restoreBindings(t)
+					notified[t.Slot] = false
+				}
 				fails[t.Slot] = 0
-				notified[t.Slot] = false
 				continue
 			}
 
@@ -44,14 +49,83 @@ func (m *Manager) WatchHealth() {
 
 			if !notified[t.Slot] {
 				notified[t.Slot] = true
+				// 解绑回直连，保证节点链接仍能访问（流量走机器本身出口）
+				m.unbindToDirect(t)
 				go sendTG(fmt.Sprintf(
-					"⚠️ fanout SOCKS5 出口掉线\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n正在自动换节点重连",
-					t.Node.HostName, t.Slot, t.Port,
+					"⚠️ [%s] fanout SOCKS5 出口掉线\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n已自动切回直连（机器本身出口），正在尝试换节点重连",
+					nodeNameForNotify(), t.Node.HostName, t.Slot, t.Port,
 				))
 			}
 			m.reconnect(t, t.Node.HostName)
 		}
 	}
+}
+
+// unbindToDirect 把绑在指定隧道上的所有入站解绑，让流量回落到机器本身的直连出口。
+// 失败只记日志：健康检查与通知都不应因此中断。
+func (m *Manager) unbindToDirect(t *Tunnel) {
+	p, err := openPanel()
+	if err != nil {
+		return
+	}
+	live := map[string]bool{}
+	ins, err := p.Inbounds(live)
+	if err != nil {
+		log.Printf("掉线解绑失败（读取入站列表）: %v", err)
+		return
+	}
+	for _, ib := range ins {
+		if ib.BoundTo != t.Node.HostName {
+			continue
+		}
+		if err := p.Bind(ib.Tag, "", m.Tunnels()); err != nil {
+			log.Printf("掉线解绑入站 %s 失败: %v", ib.Tag, err)
+			continue
+		}
+		log.Printf("隧道 %d 掉线，入站 %s 已解绑回直连", t.Slot, ib.Tag)
+	}
+}
+
+// restoreBindings 隧道恢复后，把之前因掉线解绑的入站重新绑回这条隧道的 SOCKS5 出口。
+// 节点可能在重连时换了（reconnect 会换候选节点），绑回当前实际节点。
+func (m *Manager) restoreBindings(t *Tunnel) {
+	p, err := openPanel()
+	if err != nil {
+		return
+	}
+	live := map[string]bool{}
+	ins, err := p.Inbounds(live)
+	if err != nil {
+		log.Printf("恢复绑定失败（读取入站列表）: %v", err)
+		return
+	}
+	rebound := 0
+	for _, ib := range ins {
+		// 当前没绑在任何出口上的入站，大概率就是掉线时被解绑的那批
+		if ib.BoundTo != "" {
+			continue
+		}
+		if err := p.Bind(ib.Tag, t.Node.HostName, m.Tunnels()); err != nil {
+			log.Printf("恢复绑定入站 %s 失败: %v", ib.Tag, err)
+			continue
+		}
+		rebound++
+		log.Printf("隧道 %d 已恢复，入站 %s 重新绑定到 SOCKS5 出口", t.Slot, ib.Tag)
+	}
+	if rebound > 0 {
+		go sendTG(fmt.Sprintf(
+			"✅ [%s] fanout SOCKS5 出口已恢复\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n已切回 SOCKS5 出口",
+			nodeNameForNotify(), t.Node.HostName, t.Slot, t.Port,
+		))
+	}
+}
+
+// nodeNameForNotify 取本机节点名称（机器名）用于通知；拿不到就兜底成"未命名机器"。
+func nodeNameForNotify() string {
+	if n := loadNodeName(); n != "" {
+		return n
+	}
+	return "未命名机器"
 }
 
 // tunnelHealthy 判断隧道是否还真的走在 VPN 上。

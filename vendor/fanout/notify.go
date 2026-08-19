@@ -54,6 +54,24 @@ func loadTGConfig() (token, chatID string) {
 	return token, chatID
 }
 
+// loadNodeName 返回本机的节点名称（机器名），用于通知里区分是哪台机器发的。
+//
+// 配置来源(按优先级):
+//  1. 环境变量 FANOUT_NODE_NAME
+//  2. argo-fanout 一键安装写下的 sb-argo 配置:${HOME}/.config/sb-argo/config.conf 的 NODE_NAME
+//
+// 两者都没有就返回空串,调用方决定怎么兜底。
+func loadNodeName() string {
+	if v := strings.TrimSpace(os.Getenv("FANOUT_NODE_NAME")); v != "" {
+		return v
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/root"
+	}
+	return readShellKV(filepath.Join(home, ".config", "sb-argo", "config.conf"), "NODE_NAME")
+}
+
 // readShellKV 从 bash 风格 KEY='value' 的配置文件里取一个键的值。
 // 找不到键或文件不存在都返回空串。
 func readShellKV(path, key string) string {
