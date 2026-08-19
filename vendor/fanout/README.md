@@ -171,6 +171,21 @@ f uninstall  # 卸载
 netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符就自动换节点重连，
 槽位和端口不变，原先指向它的节点链接会自动改绑过去。
 
+### 出口掉线的自动切换与 Telegram 通知
+
+判定掉线后除了换节点重连，还会：
+
+1. **自动切回直连**：把绑定在该出口上的入站解绑，流量回落到机器本身的直连出口，
+   节点链接保持可用。
+2. **自动切回 SOCKS5**：隧道恢复后入站自动重新绑回到 SOCKS5 出口。
+3. **Telegram 通知**：掉线/恢复各推一条，消息带机器名（`FANOUT_NODE_NAME`
+   环境变量，或 `~/.config/sb-argo/config.conf` 的 `NODE_NAME`）。
+
+要启用 TG 通知需配置 Bot Token / Chat ID：优先读环境变量
+`FANOUT_TG_BOT_TOKEN` / `FANOUT_TG_CHAT_ID`，否则读
+`~/.config/sb-argo/secrets.conf` 的 `TG_BOT_TOKEN` 与
+`~/.config/sb-argo/config.conf` 的 `TG_CHAT_ID`。没配置则只自动切换、不推送。
+
 ## 已知限制
 
 - 只转发 TCP。SOCKS5 收到域名时在本机解析，隧道内不跑 UDP/DNS。
