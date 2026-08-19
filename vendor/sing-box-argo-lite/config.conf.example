@@ -26,6 +26,10 @@ GITHUB_TOKEN=''
 # 尝试添加当前用户的 crontab @reboot 项
 ENABLE_CRON='true'
 
+# true: 添加 crontab 定期执行 sb-argo doctor 自愈
+# doctor 会拉起挂掉的进程，并在临时域名变化时自动刷新订阅
+ENABLE_DOCTOR='true'
+
 # 64 MB 机器的 Go 堆软限制，不是进程 RSS 硬限制
 SB_MEMORY='18MiB'
 CF_MEMORY='24MiB'

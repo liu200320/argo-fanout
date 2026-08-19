@@ -339,6 +339,27 @@ firewall-cmd --permanent --add-port=8899/tcp && firewall-cmd --reload
 - **管理地址**：浏览器访问，用于管理出口节点
 - **访问口令**：登录管理面板时输入
 
+#### 随时查看节点链接
+
+安装完成后任何时间想再看节点链接，在服务器上执行：
+
+```bash
+sb-argo show
+```
+
+会直接打印节点信息（地址、UUID、节点链接、订阅地址）。节点链接也会写入文件：
+
+```bash
+cat ~/.local/share/sb-argo/state/node-info.txt
+```
+
+客户端订阅文件在 `~/.local/share/sb-argo/state/subscription.txt`。
+
+> **注意**：Quick Tunnel 的 `*.trycloudflare.com` 域名在 cloudflared 重启后会变化
+> （例如执行 `sb-argo restart`）。新域名会被自动写进上面两个文件，
+> 客户端里的旧链接会失效，需要重新 `sb-argo show` 取新链接。
+> 本项目的 **doctor 自愈**（见下）会自动处理这种情况。
+
 ### 2. 配置出口节点
 
 1. 用浏览器打开 **管理地址**，输入**访问口令**登录
@@ -391,7 +412,27 @@ sb-argo stop
 
 # 更新到最新版
 sb-argo update
+
+# 自愈：进程挂掉自动拉起、临时域名变化自动刷新订阅
+sb-argo doctor
 ```
+
+#### 开机自启与定期自愈
+
+安装器默认开启自愈，会写入 crontab 两条任务（可用 `crontab -l` 查看）：
+
+```text
+@reboot     sleep 20; sb-argo start           # 开机自动启动
+*/2 * * * * sb-argo doctor                    # 每 2 分钟自愈检查
+```
+
+- **开机自启**：服务器重启后约 20 秒，sing-box 与 cloudflared 自动拉起。
+- **定期自愈**：每 2 分钟检查一次，发现 sing-box 或 cloudflared 挂掉会自动拉起；
+  若 cloudflared 重启导致临时域名变化，会**自动刷新订阅文件**
+  （`node-info.txt` / `subscription.txt`），Gist 订阅也会同步更新。
+
+> 关闭自愈：`ENABLE_DOCTOR=false bash <(curl ...)` 重新安装即可。
+> 不依赖固定域名：Quick Tunnel 域名变化后系统会自动处理，客户端重新拉取订阅/链接即可。
 
 #### systemd 服务管理
 ```bash

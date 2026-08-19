@@ -64,6 +64,7 @@ sb-argo restart
 sb-argo logs
 sb-argo stop
 sb-argo update
+sb-argo doctor
 sb-argo uninstall
 ```
 
@@ -72,6 +73,20 @@ sb-argo uninstall
 ```bash
 ~/.local/bin/sb-argo show
 ```
+
+## 开机自启与定期自愈
+
+安装器默认写入 crontab 两条任务（`crontab -l` 可查看）：
+
+```text
+@reboot     sleep 20; sb-argo start   # 开机自动启动
+*/2 * * * * sb-argo doctor            # 每 2 分钟自愈检查
+```
+
+- **doctor**：发现 sing-box 或 cloudflared 挂掉会自动拉起；
+  若 cloudflared 重启导致临时域名变化，自动刷新 `node-info.txt` /
+  `subscription.txt`，启用了 Gist 时在线订阅同步更新。
+- 关闭自愈：`ENABLE_DOCTOR=false bash <(curl ...)` 重新安装。
 
 ## 本地订阅文件
 
