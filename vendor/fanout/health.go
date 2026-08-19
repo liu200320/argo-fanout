@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os/exec"
 	"strconv"
@@ -16,8 +17,10 @@ const (
 
 // WatchHealth 周期检查每条隧道是否还能出网，掉线的自动换节点重连。
 // VPN Gate 是志愿者节点，运行中掉线很常见。
+// 判掉线时会发一条 Telegram 提醒；每条隧道掉线只提醒一次，恢复后再掉线才重新提醒。
 func (m *Manager) WatchHealth() {
 	fails := map[int]int{}
+	notified := map[int]bool{}
 
 	for range time.Tick(healthInterval) {
 		for _, t := range m.Tunnels() {
@@ -26,6 +29,7 @@ func (m *Manager) WatchHealth() {
 			}
 			if m.tunnelHealthy(t) {
 				fails[t.Slot] = 0
+				notified[t.Slot] = false
 				continue
 			}
 
@@ -37,6 +41,14 @@ func (m *Manager) WatchHealth() {
 
 			log.Printf("隧道 %d (%s) 已掉线，正在换节点重连", t.Slot, t.Node.HostName)
 			fails[t.Slot] = 0
+
+			if !notified[t.Slot] {
+				notified[t.Slot] = true
+				go sendTG(fmt.Sprintf(
+					"⚠️ fanout SOCKS5 出口掉线\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n正在自动换节点重连",
+					t.Node.HostName, t.Slot, t.Port,
+				))
+			}
 			m.reconnect(t, t.Node.HostName)
 		}
 	}
