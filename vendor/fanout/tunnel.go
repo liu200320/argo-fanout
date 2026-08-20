@@ -253,11 +253,14 @@ func (t *Tunnel) probeExitIP() (string, error) {
 // 只走 HTTPS + 强制 IPv4：明文 HTTP 会被部分出口侧劫持/过滤，不带 -4 时
 // curl 可能优先走 IPv6，两者都会让健康检查阶段拿到的 IP 与建隧道时不一致，
 // 被误判成"掉线"。多个接口并发互备，总耗时不超过 timeout，单个接口抖动不算失败。
+// 全部失败时返回 *probeFailure，其 Reason() 给出一句给用户看的中文原因，
+// 不再直接暴露 signal: killed 这类英文底层错误。
 func probeExitIPVia(ns string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	type res struct {
+		url string
 		ip  string
 		err error
 	}
@@ -270,27 +273,105 @@ func probeExitIPVia(ns string, timeout time.Duration) (string, error) {
 			out, err := exec.CommandContext(ctx, "ip", "netns", "exec", ns,
 				"curl", "-4", "-s", "--max-time", strconv.Itoa(int(timeout.Seconds())), u).Output()
 			if err != nil {
-				ch <- res{err: fmt.Errorf("%s: %v", u, err)}
+				ch <- res{url: u, err: err}
 				return
 			}
 			ip := strings.TrimSpace(string(out))
 			if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
-				ch <- res{ip: ip}
+				ch <- res{url: u, ip: ip}
 				return
 			}
-			ch <- res{err: fmt.Errorf("%s: 返回异常 %q", u, ip)}
+			ch <- res{url: u, err: fmt.Errorf("返回异常 %q", ip)}
 		}(url)
 	}
 	go func() { wg.Wait(); close(ch) }()
 
-	var errs []string
+	var errs []sourceErr
 	for r := range ch {
 		if r.ip != "" {
 			return r.ip, nil
 		}
-		errs = append(errs, r.err.Error())
+		errs = append(errs, sourceErr{url: r.url, err: r.err})
 	}
-	return "", fmt.Errorf("全部失败: %s", strings.Join(errs, "; "))
+	return "", newProbeFailure(errs, len(publicIPSources))
+}
+
+// sourceErr 记录一个探测接口的地址与其底层失败原因。
+type sourceErr struct {
+	url string
+	err error
+}
+
+// probeFailure 记录出口探测全败的汇总。Error() 保留英文底层细节给排障，
+// Reason() 汇总成一句中文原因给用户看（日志、通知都用它，不再出现英文）。
+type probeFailure struct {
+	errs  []sourceErr
+	total int // 探测接口总数
+}
+
+func newProbeFailure(errs []sourceErr, total int) error {
+	return &probeFailure{errs: errs, total: total}
+}
+
+func (p *probeFailure) Error() string {
+	parts := make([]string, len(p.errs))
+	for i, se := range p.errs {
+		parts[i] = se.url + ": " + se.err.Error()
+	}
+	return fmt.Sprintf("全部失败: %s", strings.Join(parts, "; "))
+}
+
+// Reason 汇总成一句中文原因，例如
+// "全部 3 个探测接口失败：探测超时无响应（8 秒内无数据返回，探测进程被强制结束）"。
+func (p *probeFailure) Reason() string {
+	if len(p.errs) == 0 {
+		return "所有出口探测接口均失败"
+	}
+	cause := classifyProbeCause(p.errs)
+	if cause == "" {
+		cause = "探测接口无响应"
+	}
+	if len(p.errs) >= p.total {
+		return fmt.Sprintf("全部 %d 个探测接口失败：%s", p.total, cause)
+	}
+	return fmt.Sprintf("%d/%d 个探测接口失败：%s", len(p.errs), p.total, cause)
+}
+
+// probeErrPatterns 把常见底层错误映射成中文原因。顺序即优先级：
+// 三个接口死因通常一致，命中数量相同时排在前面的先胜出。
+var probeErrPatterns = []struct{ sub, zh string }{
+	{"signal: killed", "探测超时无响应（8 秒内无数据返回，探测进程被强制结束）"},
+	{"context deadline exceeded", "探测超过时限，没有任何接口返回"},
+	{"temporary failure in name resolution", "DNS 解析失败（无法解析探测服务器域名）"},
+	{"could not resolve host", "DNS 解析失败（无法解析探测服务器域名）"},
+	{"no such host", "DNS 解析失败（无法解析探测服务器域名）"},
+	{"connection refused", "连接被拒绝（探测服务器端口未开放）"},
+	{"connection timed out", "连接超时（无法连上探测服务器）"},
+	{"timed out", "连接超时（无法连上探测服务器）"},
+	{"network is unreachable", "网络不可达（隧道出口已完全没有外网）"},
+	{"no route to host", "无路由到探测服务器"},
+	{"exit status 28", "探测响应超时"},
+	{"exit status 7", "无法连接探测服务器"},
+	{"exit status 6", "无法解析探测服务器域名"},
+}
+
+// classifyProbeCause 从一堆接口错误里挑出现次数最多的一种翻译成中文。
+// 三个接口通常同一种死因（比如全是被超时杀掉），重复罗列没意义，
+// 挑最有代表性的说一句就够了；没有认识的错误时返回空串。
+func classifyProbeCause(errs []sourceErr) string {
+	best, bestCnt := "", 0
+	for _, pat := range probeErrPatterns {
+		cnt := 0
+		for _, se := range errs {
+			if strings.Contains(strings.ToLower(se.err.Error()), pat.sub) {
+				cnt++
+			}
+		}
+		if cnt > bestCnt {
+			best, bestCnt = pat.zh, cnt
+		}
+	}
+	return best
 }
 
 // stop 停止这条隧道并清理它占用的所有资源。

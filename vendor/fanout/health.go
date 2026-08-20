@@ -218,10 +218,15 @@ func nodeNameForNotify() string {
 //     这里强制 HTTPS + IPv4，多接口互备，单个接口抖动不算失败。
 //   - 出口 IP 漂移：VPN Gate 节点常多出口或负载均衡，IP 变了并不代表掉线；
 //     只要没退回母机 IP（说明还在 VPN 上）就算健康。
-// 返回原因字符串，空串表示健康；非空供日志与掉线通知写明"确认过"，免得用户当成误报。
+// 返回原因字符串，空串表示健康；非空是给用户看的中文原因（全部失败时会汇总成
+// 一句中文描述，不暴露 signal: killed 这类英文底层错误），供日志与掉线通知写明
+// "确认过"，免得用户当成误报。
 func (m *Manager) tunnelHealthy(t *Tunnel) (bool, string) {
 	got, err := probeExitIPVia(t.nsName(), healthTimeout)
 	if err != nil {
+		if pf, ok := err.(*probeFailure); ok {
+			return false, pf.Reason()
+		}
 		return false, "所有出口探测接口均失败（" + err.Error() + "）"
 	}
 	host := hostPublicIP()
