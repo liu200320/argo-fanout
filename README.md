@@ -460,11 +460,17 @@ sb-argo tg-test
 
 - **开机自启**：服务器重启后约 20 秒，sing-box 与 cloudflared 自动拉起。
 - **定期自愈**：每 2 分钟检查一次，发现 sing-box 或 cloudflared 挂掉会自动拉起；
-  若 cloudflared 重启导致临时域名变化，会**自动刷新订阅文件**
-  （`node-info.txt` / `subscription.txt`），Gist 订阅也会同步更新。
+  若 cloudflared 重启导致临时域名变化，会**自动刷新订阅文件和 node-info**
+  （`node-info.txt` / `subscription.txt`），Gist 订阅也会同步更新，
+  并把新节点链接自动推送到 Telegram（链接没变时不打扰）。
+- **doctor 不重写 sing-box.json**：配置初始化（模板生成、保存 config.conf、校验）
+  只在 `install` 时执行一次；`start`/`restart`/`doctor` 只负责拉起进程、保留现有配置。
+  这样 fanout 注入的 socks 出站和路由规则不会被 cron 周期任务冲掉，
+  面板里的出口绑定能长期保持，手动/自动切换都不会消失。
 
 > 关闭自愈：`ENABLE_DOCTOR=false bash <(curl ...)` 重新安装即可。
-> 不依赖固定域名：Quick Tunnel 域名变化后系统会自动处理，客户端重新拉取订阅/链接即可。
+> 不依赖固定域名：Quick Tunnel 域名变化后系统会自动处理（刷新订阅 + 推送新链接），
+> 客户端重新拉取订阅/链接即可。
 
 #### fanout 出口掉线的自动切换与 Telegram 通知
 
