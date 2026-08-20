@@ -3,16 +3,13 @@ package main
 import (
 	"fmt"
 	"log"
-	"os/exec"
-	"strconv"
-	"strings"
 	"time"
 )
 
 const (
 	healthInterval = 10 * time.Second
-	healthFailures = 2 // 连续失败几次才判定掉线，避免网络抖动误杀
-	healthTimeout  = 6 * time.Second
+	healthFailures = 3 // 连续失败几次才判定掉线，避免网络抖动误杀
+	healthTimeout  = 8 * time.Second
 )
 
 // WatchHealth 周期检查每条隧道是否还能出网，掉线的自动换节点重连。
@@ -28,7 +25,8 @@ func (m *Manager) WatchHealth() {
 			if t.Status != "up" {
 				continue
 			}
-			if m.tunnelHealthy(t) {
+			healthy, why := m.tunnelHealthy(t)
+			if healthy {
 				// 之前掉线通知过且隧道已恢复：把入站重新绑回 SOCKS5 出口
 				if notified[t.Slot] {
 					m.restoreBindings(t)
@@ -40,11 +38,12 @@ func (m *Manager) WatchHealth() {
 
 			fails[t.Slot]++
 			if fails[t.Slot] < healthFailures {
-				log.Printf("隧道 %d (%s) 探测失败 %d 次", t.Slot, t.Node.HostName, fails[t.Slot])
+				log.Printf("隧道 %d (%s) 探测失败 %d 次: %s", t.Slot, t.Node.HostName, fails[t.Slot], why)
 				continue
 			}
 
-			log.Printf("隧道 %d (%s) 已掉线，正在换节点重连", t.Slot, t.Node.HostName)
+			log.Printf("隧道 %d (%s) 已掉线，正在换节点重连（连续 %d 次探测失败: %s）",
+				t.Slot, t.Node.HostName, healthFailures, why)
 			fails[t.Slot] = 0
 
 			if !notified[t.Slot] {
@@ -56,6 +55,10 @@ func (m *Manager) WatchHealth() {
 					"⚠️ [%s] fanout SOCKS5 出口掉线\n\n节点: %s\n槽位: %d\n本地端口: %d\n",
 					nodeNameForNotify(), t.Node.HostName, t.Slot, t.Port,
 				)
+				// 写清楚已确认出口确实不可用（连续 3 次探测都失败），不是网络抖动
+				if why != "" {
+					msg += "\n已确认出口不可用：" + why
+				}
 				if action != "" {
 					msg += "\n" + action + "，正在尝试换节点重连"
 				} else {
@@ -210,20 +213,32 @@ func nodeNameForNotify() string {
 //
 // 只看"能不能出网"是不够的：netns 通过 veth 走母机 NAT，
 // openvpn 死掉后照样能出网，只是出口变回了母机 IP。
-// 所以要比对出口 IP 是否仍是建立隧道时拿到的那个。
-func (m *Manager) tunnelHealthy(t *Tunnel) bool {
-	out, err := exec.Command("ip", "netns", "exec", t.nsName(),
-		"curl", "-s", "--max-time", strconv.Itoa(int(healthTimeout.Seconds())),
-		"http://api.ipify.org").Output()
+// 所以要比对出口 IP，但要避免两个误判源：
+//   - 明文 HTTP / 不带 -4：容易被出口侧劫持或走 IPv6，和建隧道时的出口比对会抖；
+//     这里强制 HTTPS + IPv4，多接口互备，单个接口抖动不算失败。
+//   - 出口 IP 漂移：VPN Gate 节点常多出口或负载均衡，IP 变了并不代表掉线；
+//     只要没退回母机 IP（说明还在 VPN 上）就算健康。
+// 返回原因字符串，空串表示健康；非空供日志与掉线通知写明"确认过"，免得用户当成误报。
+func (m *Manager) tunnelHealthy(t *Tunnel) (bool, string) {
+	got, err := probeExitIPVia(t.nsName(), healthTimeout)
 	if err != nil {
-		return false
+		return false, "所有出口探测接口均失败（" + err.Error() + "）"
 	}
-	got := strings.TrimSpace(string(out))
-	if got == "" {
-		return false
+	host := hostPublicIP()
+	if host != "" && !exitIPStillOnVPN(got, host) {
+		return false, "出口 IP 已退回母机 " + host + "（openvpn 疑似断开）"
 	}
-	// 出口 IP 变了说明 VPN 已经断开，流量退回了母机
-	return got == t.ExitIP
+	return true, ""
+}
+
+// exitIPStillOnVPN 判定探测到的出口 IP 是否还说明流量走在 VPN 上：
+// 只要不是母机自己的公网 IP（说明流量没退回母机直连）就算还在 VPN 上。
+// 母机公网 IP 未知（host==""）时不再强判，任何能拿到的出口 IP 都视为健康。
+func exitIPStillOnVPN(got, host string) bool {
+	if host == "" {
+		return true
+	}
+	return got != host
 }
 
 // reconnect 就地把一条隧道换到别的节点上，保持槽位与端口不变，

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -241,17 +243,54 @@ func (t *Tunnel) setCredential(c SocksCred) {
 }
 
 // probeExitIP 通过隧道查询出口 IP，用于确认这条隧道确实换了 IP。
+// 建隧道时的首次探测：多个 HTTPS 接口互备，任一成功即返回。
 func (t *Tunnel) probeExitIP() (string, error) {
-	out, err := exec.Command("ip", "netns", "exec", t.nsName(),
-		"curl", "-s", "--max-time", "15", "http://api.ipify.org").Output()
-	if err != nil {
-		return "", fmt.Errorf("查询出口 IP 失败: %w", err)
+	return probeExitIPVia(t.nsName(), 15*time.Second)
+}
+
+// probeExitIPVia 在指定的 netns 内查出口公网 IPv4。
+//
+// 只走 HTTPS + 强制 IPv4：明文 HTTP 会被部分出口侧劫持/过滤，不带 -4 时
+// curl 可能优先走 IPv6，两者都会让健康检查阶段拿到的 IP 与建隧道时不一致，
+// 被误判成"掉线"。多个接口并发互备，总耗时不超过 timeout，单个接口抖动不算失败。
+func probeExitIPVia(ns string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	type res struct {
+		ip  string
+		err error
 	}
-	ip := strings.TrimSpace(string(out))
-	if net.ParseIP(ip) == nil {
-		return "", fmt.Errorf("出口 IP 返回异常: %q", ip)
+	ch := make(chan res, len(publicIPSources))
+	var wg sync.WaitGroup
+	for _, url := range publicIPSources {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			out, err := exec.CommandContext(ctx, "ip", "netns", "exec", ns,
+				"curl", "-4", "-s", "--max-time", strconv.Itoa(int(timeout.Seconds())), u).Output()
+			if err != nil {
+				ch <- res{err: fmt.Errorf("%s: %v", u, err)}
+				return
+			}
+			ip := strings.TrimSpace(string(out))
+			if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
+				ch <- res{ip: ip}
+				return
+			}
+			ch <- res{err: fmt.Errorf("%s: 返回异常 %q", u, ip)}
+		}(url)
 	}
-	return ip, nil
+	go func() { wg.Wait(); close(ch) }()
+
+	var errs []string
+	for r := range ch {
+		if r.ip != "" {
+			return r.ip, nil
+		}
+		errs = append(errs, r.err.Error())
+	}
+	return "", fmt.Errorf("全部失败: %s", strings.Join(errs, "; "))
 }
 
 // stop 停止这条隧道并清理它占用的所有资源。
