@@ -17,8 +17,8 @@ const (
 
 // WatchHealth 周期检查每条隧道是否还能出网，掉线的自动换节点重连。
 // VPN Gate 是志愿者节点，运行中掉线很常见。
-// 判掉线时会把绑在该隧道上的入站解绑回直连（保证节点仍可用），并推送 Telegram 提醒；
-// 每条隧道掉线只提醒一次，恢复后重新绑定回 SOCKS5 出口再提醒一次。
+// 判掉线时会把绑在该隧道上的入站解绑回直连或迁到备用出口（保证节点仍可用），并推送 Telegram 提醒；
+// 每条隧道掉线只提醒一次，恢复后（有绑定的会先重新绑回 SOCKS5 出口）再提醒一次，形成闭环。
 func (m *Manager) WatchHealth() {
 	fails := map[int]int{}
 	notified := map[int]bool{}
@@ -185,12 +185,17 @@ func (m *Manager) restoreBindings(t *Tunnel) {
 		}
 	}
 	delete(m.migrated, t.Slot)
+	// 恢复通知无论有没有入站绑定都发：掉线时提醒过，恢复后也要让用户知道已重新连上，
+	// 否则"没绑定的出口"只有掉线一条 ⚠️、没有恢复 ✅，像是有去无回。
+	// 有绑定迁回的写明"已切回 SOCKS5 出口"，没有的写"已恢复正常出网"。
+	tail := "已恢复正常出网"
 	if rebound > 0 {
-		go sendTG(fmt.Sprintf(
-			"✅ [%s] fanout SOCKS5 出口已恢复\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n已切回 SOCKS5 出口",
-			nodeNameForNotify(), t.Node.HostName, t.Slot, t.Port,
-		))
+		tail = "已切回 SOCKS5 出口"
 	}
+	go sendTG(fmt.Sprintf(
+		"✅ [%s] fanout SOCKS5 出口已恢复\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n%s",
+		nodeNameForNotify(), t.Node.HostName, t.Slot, t.Port, tail,
+	))
 }
 
 // nodeNameForNotify 取本机节点名称（机器名）用于通知；拿不到就兜底成"未命名机器"。
