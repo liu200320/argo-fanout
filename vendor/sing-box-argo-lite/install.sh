@@ -679,6 +679,10 @@ build_vless_link() {
   chmod 600 "$SUB_FILE"
 
   SUB_URL="未发布在线订阅"
+
+  # 订阅/节点链接更新后推送 TG（含 install/restart/doctor/start 等所有路径）。
+  # tg_send_node 自带去重：链接没变不打扰，只有真的换了域名才发送。
+  tg_send_node
 }
 
 # start_cloudflared：启动 cloudflared 并等待临时域名；域名写入全局 DOMAIN/VLESS_LINK。
@@ -687,6 +691,11 @@ start_cloudflared() {
   printf '正在启动 Cloudflare 临时隧道...\n'
 
   : >"${STATE_DIR}/cloudflared-empty.yml"
+
+  # 必须清空旧日志再启动：trycloudflare 域名在旧日志里残留，
+  # 不清的话下面的等待循环第一轮就会从旧日志提取到旧域名并立即 break，
+  # 新进程分配的新域名反而永远不会被读到，订阅会被写成失效的旧地址。
+  : >"$CF_LOG"
 
   nohup env \
     GOMAXPROCS=1 \
