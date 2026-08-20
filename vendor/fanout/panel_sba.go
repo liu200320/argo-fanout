@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,11 @@ type SBA struct {
 
 	// restart 单独拎出来，测试里可以换成不真的去动进程
 	restart func() error
+
+	// saveMu 串行化 saveCfg：多条隧道几乎同时 up 时会并发 OnTunnelsChanged，
+	// 若共用同一个固定临时文件名，一次 rename 取走文件后另一次就会
+	// "no such file or directory" 而丢掉整次写配置。
+	saveMu sync.Mutex
 }
 
 const (
@@ -172,22 +178,45 @@ func (s *SBA) loadCfg() (map[string]any, error) {
 // 先写临时文件、校验、再原子改名：配置写坏时 sing-box 起不来，
 // 而 Argo 隧道还在，客户端会连到一个空端口上。
 // 临时文件的属主要跟着改回去，否则用户下次自己改配置会被拒。
+//
+// 并发安全：用 saveMu 串行化整次写入，并让临时文件名唯一。
+// 多条隧道几乎同时 up 会各自触发 OnTunnelsChanged，若不互斥，
+// 两个 goroutine 会抢同一个固定临时文件名，一个 rename 取走文件后
+// 另一个就报 ENOENT，整次写配置被丢掉。
 func (s *SBA) saveCfg(cfg map[string]any) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	blob, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
-	tmp := s.cfgPath + ".fanout.tmp"
-	if err := os.WriteFile(tmp, blob, 0600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(s.cfgPath), ".sing-box-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建临时配置失败: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(blob); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("写入临时配置失败: %w", err)
 	}
-	s.chownToOwner(tmp)
-	if err := s.checkConfig(tmp); err != nil {
-		os.Remove(tmp)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("设置临时配置权限失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("关闭临时配置失败: %w", err)
+	}
+	s.chownToOwner(tmpPath)
+	if err := s.checkConfig(tmpPath); err != nil {
+		os.Remove(tmpPath)
 		return err
 	}
-	if err := os.Rename(tmp, s.cfgPath); err != nil {
-		os.Remove(tmp)
+	if err := os.Rename(tmpPath, s.cfgPath); err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("替换配置失败: %w", err)
 	}
 	s.chownToOwner(s.cfgPath)

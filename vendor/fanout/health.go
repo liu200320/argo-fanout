@@ -49,12 +49,19 @@ func (m *Manager) WatchHealth() {
 
 			if !notified[t.Slot] {
 				notified[t.Slot] = true
-				// 解绑回直连，保证节点链接仍能访问（流量走机器本身出口）
-				m.unbindToDirect(t)
-				go sendTG(fmt.Sprintf(
-					"⚠️ [%s] fanout SOCKS5 出口掉线\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n已自动切回直连（机器本身出口），正在尝试换节点重连",
+				// 解绑回直连，保证节点链接仍能访问（流量走机器本身出口）；
+				// 返回实际解绑了几个入站，文案按结果区分。
+				unbound := m.unbindToDirect(t)
+				msg := fmt.Sprintf(
+					"⚠️ [%s] fanout SOCKS5 出口掉线\n\n节点: %s\n槽位: %d\n本地端口: %d\n",
 					nodeNameForNotify(), t.Node.HostName, t.Slot, t.Port,
-				))
+				)
+				if unbound > 0 {
+					msg += "\n已自动切回直连（机器本身出口），正在尝试换节点重连"
+				} else {
+					msg += "\n正在尝试换节点重连（该出口当前没有入站绑定，节点链接不受影响）"
+				}
+				go sendTG(msg)
 			}
 			m.reconnect(t, t.Node.HostName)
 		}
@@ -62,17 +69,19 @@ func (m *Manager) WatchHealth() {
 }
 
 // unbindToDirect 把绑在指定隧道上的所有入站解绑，让流量回落到机器本身的直连出口。
+// 返回实际解绑的入站数量；调用方据此决定通知怎么措辞。
 // 失败只记日志：健康检查与通知都不应因此中断。
-func (m *Manager) unbindToDirect(t *Tunnel) {
+func (m *Manager) unbindToDirect(t *Tunnel) int {
+	unbound := 0
 	p, err := openPanel()
 	if err != nil {
-		return
+		return 0
 	}
 	live := map[string]bool{}
 	ins, err := p.Inbounds(live)
 	if err != nil {
 		log.Printf("掉线解绑失败（读取入站列表）: %v", err)
-		return
+		return 0
 	}
 	for _, ib := range ins {
 		if ib.BoundTo != t.Node.HostName {
@@ -82,8 +91,10 @@ func (m *Manager) unbindToDirect(t *Tunnel) {
 			log.Printf("掉线解绑入站 %s 失败: %v", ib.Tag, err)
 			continue
 		}
+		unbound++
 		log.Printf("隧道 %d 掉线，入站 %s 已解绑回直连", t.Slot, ib.Tag)
 	}
+	return unbound
 }
 
 // restoreBindings 隧道恢复后，把之前因掉线解绑的入站重新绑回这条隧道的 SOCKS5 出口。

@@ -343,6 +343,9 @@ func TestSBASaveCfgKeepsOwnerReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(s.cfgPath + ".fanout.tmp"); err == nil {
+		t.Error("旧固定名临时文件不应残留")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(s.cfgPath), ".sing-box-*.tmp")); len(matches) != 0 {
 		t.Error("临时文件应在改名后消失")
 	}
 	if _, err := s.loadCfg(); err != nil {
