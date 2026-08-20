@@ -935,12 +935,20 @@ async function openDetail(id){
 }
 
 // 出口下拉：列出所有已连通的隧道，外加"直连"。绑定按 Xray 的 inboundTag 走。
+// 绑定的出口哪怕当前不在 up 状态也要出现在列表里并选中：否则下拉会没有
+// 选中项，浏览器默认显示第一项"直连"，让人误以为绑定被清掉了。
 function exitOptions(currentHost){
   const up = view.exits.filter(e => e.status === 'up');
-  return '<option value=""' + (currentHost ? '' : ' selected') + '>直连（不走隧道）</option>'
-    + up.map(e => '<option value="' + esc(e.host) + '"'
-        + (e.host === currentHost ? ' selected' : '') + '>'
-        + esc((e.exit_ip || e.host) + ' · ' + e.region) + '</option>').join('');
+  const cur = currentHost ? view.exits.find(e => e.host === currentHost) : null;
+  let opts = '<option value=""' + (currentHost ? '' : ' selected') + '>直连（不走隧道）</option>';
+  if(cur && cur.status !== 'up'){
+    opts += '<option value="' + esc(cur.host) + '" selected>'
+      + esc((cur.exit_ip || cur.host) + ' · ' + (cur.region || '—')
+        + '（' + (STATUS[cur.status] || cur.status) + '）') + '</option>';
+  }
+  return opts + up.map(e => '<option value="' + esc(e.host) + '"'
+      + (e.host === currentHost ? ' selected' : '') + '>'
+      + esc((e.exit_ip || e.host) + ' · ' + e.region) + '</option>').join('');
 }
 
 function renderDetail(d){

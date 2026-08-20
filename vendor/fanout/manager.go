@@ -18,6 +18,10 @@ type Manager struct {
 	workDir  string
 	maxSlots int
 	jobs     JobStore
+
+	// 掉线时从对应槽位隧道迁走的入站 tag，隧道恢复后按此迁回。
+	// 只被 WatchHealth 所在的 goroutine 读写，无需加锁。
+	migrated map[int][]string
 }
 
 func NewManager(maxSlots int, workDir string) *Manager {
@@ -25,6 +29,7 @@ func NewManager(maxSlots int, workDir string) *Manager {
 		tunnels:  map[int]*Tunnel{},
 		workDir:  workDir,
 		maxSlots: maxSlots,
+		migrated: map[int][]string{},
 	}
 }
 

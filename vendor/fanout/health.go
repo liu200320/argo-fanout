@@ -49,15 +49,15 @@ func (m *Manager) WatchHealth() {
 
 			if !notified[t.Slot] {
 				notified[t.Slot] = true
-				// 解绑回直连，保证节点链接仍能访问（流量走机器本身出口）；
-				// 返回实际解绑了几个入站，文案按结果区分。
-				unbound := m.unbindToDirect(t)
+				// 优先把绑定迁到另一条连通出口，没有备用出口才解绑回直连：
+				// 绑定始终跟着可用出口走，面板显示什么就是什么，不需要手动重绑。
+				action := m.unbindToDirect(t)
 				msg := fmt.Sprintf(
 					"⚠️ [%s] fanout SOCKS5 出口掉线\n\n节点: %s\n槽位: %d\n本地端口: %d\n",
 					nodeNameForNotify(), t.Node.HostName, t.Slot, t.Port,
 				)
-				if unbound > 0 {
-					msg += "\n已自动切回直连（机器本身出口），正在尝试换节点重连"
+				if action != "" {
+					msg += "\n" + action + "，正在尝试换节点重连"
 				} else {
 					msg += "\n正在尝试换节点重连（该出口当前没有入站绑定，节点链接不受影响）"
 				}
@@ -68,61 +68,123 @@ func (m *Manager) WatchHealth() {
 	}
 }
 
-// unbindToDirect 把绑在指定隧道上的所有入站解绑，让流量回落到机器本身的直连出口。
-// 返回实际解绑的入站数量；调用方据此决定通知怎么措辞。
+// unbindToDirect 出口掉线后处理绑在它上面的入站：
+// 优先整体迁到另一条连通的隧道（保证分流不中断），只有没有备用出口时才解绑回直连。
+// 返回描述去向的文案，空串表示该出口没有入站绑定、无需处理。
 // 失败只记日志：健康检查与通知都不应因此中断。
-func (m *Manager) unbindToDirect(t *Tunnel) int {
-	unbound := 0
+func (m *Manager) unbindToDirect(t *Tunnel) string {
 	p, err := openPanel()
 	if err != nil {
-		return 0
+		return ""
 	}
-	live := map[string]bool{}
-	ins, err := p.Inbounds(live)
+	ins, err := p.Inbounds(map[string]bool{})
 	if err != nil {
-		log.Printf("掉线解绑失败（读取入站列表）: %v", err)
-		return 0
+		log.Printf("掉线处理失败（读取入站列表）: %v", err)
+		return ""
 	}
+	tags := []string{}
 	for _, ib := range ins {
-		if ib.BoundTo != t.Node.HostName {
-			continue
+		if ib.BoundTo == t.Node.HostName {
+			tags = append(tags, ib.Tag)
 		}
-		if err := p.Bind(ib.Tag, "", m.Tunnels()); err != nil {
-			log.Printf("掉线解绑入站 %s 失败: %v", ib.Tag, err)
-			continue
-		}
-		unbound++
-		log.Printf("隧道 %d 掉线，入站 %s 已解绑回直连", t.Slot, ib.Tag)
 	}
-	return unbound
+	if len(tags) == 0 {
+		return ""
+	}
+
+	// 备用出口：另一条 up 的隧道。绑定走到哪，面板就显示到哪。
+	var alt *Tunnel
+	for _, x := range m.Tunnels() {
+		if x.Status == "up" && x.Slot != t.Slot {
+			alt = x
+			break
+		}
+	}
+
+	moved := 0
+	if alt != nil {
+		for _, tag := range tags {
+			if err := p.Bind(tag, alt.Node.HostName, m.Tunnels()); err != nil {
+				log.Printf("掉线迁移入站 %s 到备用出口 %s 失败: %v", tag, alt.Node.HostName, err)
+				continue
+			}
+			moved++
+			log.Printf("隧道 %d 掉线，入站 %s 已切到备用出口 %s", t.Slot, tag, alt.Node.HostName)
+		}
+		if moved == 0 {
+			return ""
+		}
+		m.migrated[t.Slot] = tags
+		return fmt.Sprintf("已自动切到备用出口 %s", alt.Node.HostName)
+	}
+
+	for _, tag := range tags {
+		if err := p.Bind(tag, "", m.Tunnels()); err != nil {
+			log.Printf("掉线解绑入站 %s 失败: %v", tag, err)
+			continue
+		}
+		moved++
+		log.Printf("隧道 %d 掉线，入站 %s 已解绑回直连", t.Slot, tag)
+	}
+	if moved == 0 {
+		return ""
+	}
+	m.migrated[t.Slot] = tags
+	return "已自动切回直连（机器本身出口）"
 }
 
-// restoreBindings 隧道恢复后，把之前因掉线解绑的入站重新绑回这条隧道的 SOCKS5 出口。
+// restoreBindings 隧道恢复后，把掉线时从它迁走的入站重新绑回这条隧道的 SOCKS5 出口。
 // 节点可能在重连时换了（reconnect 会换候选节点），绑回当前实际节点。
 func (m *Manager) restoreBindings(t *Tunnel) {
 	p, err := openPanel()
 	if err != nil {
 		return
 	}
-	live := map[string]bool{}
-	ins, err := p.Inbounds(live)
+	ins, err := p.Inbounds(map[string]bool{})
 	if err != nil {
 		log.Printf("恢复绑定失败（读取入站列表）: %v", err)
 		return
 	}
-	rebound := 0
+
+	// 掉线迁走的这批入站，可能被后续掉线又迁去了别处或解绑回直连，
+	// 只要没绑回本隧道就重新绑回来。
+	waiting := m.migrated[t.Slot]
+	byTag := map[string]bool{}
+	for _, tag := range waiting {
+		byTag[tag] = true
+	}
+	cur := map[string]string{}
 	for _, ib := range ins {
-		// 当前没绑在任何出口上的入站，大概率就是掉线时被解绑的那批
-		if ib.BoundTo != "" {
+		cur[ib.Tag] = ib.BoundTo
+	}
+
+	rebound := 0
+	for _, tag := range waiting {
+		if cur[tag] == t.Node.HostName {
 			continue
 		}
-		if err := p.Bind(ib.Tag, t.Node.HostName, m.Tunnels()); err != nil {
-			log.Printf("恢复绑定入站 %s 失败: %v", ib.Tag, err)
+		if err := p.Bind(tag, t.Node.HostName, m.Tunnels()); err != nil {
+			log.Printf("恢复绑定入站 %s 失败: %v", tag, err)
 			continue
 		}
 		rebound++
-		log.Printf("隧道 %d 已恢复，入站 %s 重新绑定到 SOCKS5 出口", t.Slot, ib.Tag)
+		log.Printf("隧道 %d 已恢复，入站 %s 重新绑定到 SOCKS5 出口", t.Slot, tag)
 	}
+	if len(waiting) == 0 {
+		// 旧版本升上来：没有迁移记录，但有掉线时解绑回直连的入站，一并兜底绑回。
+		for _, ib := range ins {
+			if ib.BoundTo != "" {
+				continue
+			}
+			if err := p.Bind(ib.Tag, t.Node.HostName, m.Tunnels()); err != nil {
+				log.Printf("恢复绑定入站 %s 失败: %v", ib.Tag, err)
+				continue
+			}
+			rebound++
+			log.Printf("隧道 %d 已恢复，入站 %s 重新绑定到 SOCKS5 出口", t.Slot, ib.Tag)
+		}
+	}
+	delete(m.migrated, t.Slot)
 	if rebound > 0 {
 		go sendTG(fmt.Sprintf(
 			"✅ [%s] fanout SOCKS5 出口已恢复\n\n节点: %s\n槽位: %d\n本地端口: %d\n\n已切回 SOCKS5 出口",
