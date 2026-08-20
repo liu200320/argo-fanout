@@ -541,6 +541,11 @@ install_manager
 # 仅在交互式安装时询问 Telegram 配置（-f 指定配置或非交互环境自动跳过）。
 [ "$ACTION" = "install" ] && ask_telegram
 
+# 配置初始化（模板生成、保存 config.conf、check 校验）只在 install 时执行。
+# start/restart/doctor/update 必须保留现有的 sing-box.json：
+# 否则每次运行（含 cron 每 2 分钟的 doctor）都会把 fanout 注入的
+# socks 出站和路由规则冲成直连模板，面板里的绑定会被反复抹掉。
+if [ "$ACTION" = "install" ]; then
 if [ -z "$UUID" ]; then
   UUID="$("$SB_BIN" generate uuid)" || exit 1
 fi
@@ -627,6 +632,7 @@ env \
     printf '错误: sing-box 配置检查失败\n' >&2
     exit 1
   }
+fi
 
 # ── 启动进程（standalone，供 install/restart/doctor 复用）───────────
 
