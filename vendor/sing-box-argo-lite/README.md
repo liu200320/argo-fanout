@@ -108,14 +108,12 @@ sb-argo uninstall
 */2 * * * * sb-argo doctor            # 每 2 分钟自愈检查
 ```
 
-- **doctor**：发现 sing-box 或 cloudflared 挂掉会自动拉起；
+- **doctor**：发现 sing-box 或 cloudflared 挂掉会自动拉起。
+  sing-box 的健康判定是**「进程存活 + 本地端口在监听」双条件**——只有进程活着
+  但端口没绑上的"活死进程"（网络中断窗口期启动失败的遗留）也会被识别并重新拉起，
+  不会出现链接断了几十小时、doctor 却一直报"全部正常"的情况；
   若 cloudflared 重启导致临时域名变化，自动刷新 `node-info.txt` /
-  `subscription.txt`，启用了 Gist 时在线订阅同步更新，并把新节点链接
-  推送到 Telegram（链接没变时不打扰）。
-- **doctor 不会重写 `sing-box.json`**：配置初始化（模板生成、保存
-  config.conf、校验）只在 `install` 时执行一次。`start`/`restart`/`doctor`
-  都只负责拉起进程，保留现有配置。这样 fanout 注入的 socks 出站和路由规则
-  不会被 cron 周期任务冲掉，面板/节点链接后端的绑定能长期保持。
+  `subscription.txt`，启用了 Gist 时在线订阅同步更新。
 - 关闭自愈：`ENABLE_DOCTOR=false bash <(curl ...)` 重新安装。
 
 ## 本地订阅文件

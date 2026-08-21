@@ -36,7 +36,7 @@ usage() {
   bash install.sh -f config.conf
   sb-argo show
   sb-argo restart
-  sb-argo doctor    # 自愈：进程掉了自动拉起，域名变了自动刷新订阅
+  sb-argo doctor    # 自愈：进程掉了或端口没监听自动拉起，域名变了自动刷新订阅
   sb-argo tg-test   # 测试 Telegram 节点推送配置
 EOF
 }
@@ -86,7 +86,9 @@ SB_VERSION="${SB_VERSION:-}"
 # sing-box 1.12 暂时兼容旧版 domain_strategy 配置；后续迁移配置后可移除。
 ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS="${ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS:-true}"
 # 自愈：等于 true 时安装器会添加 crontab，定期执行 sb-argo doctor。
-# doctor 发现 sing-box 或 cloudflared 挂掉会自动拉起；临时域名变化时自动刷新订阅。
+# doctor 发现 sing-box 或 cloudflared 挂掉会自动拉起（sing-box 按"进程存活+端口监听"
+# 双条件判定健康，进程在但端口没绑上的"活死进程"也会被重新拉起）；
+# 临时域名变化时自动刷新订阅。
 ENABLE_DOCTOR="${ENABLE_DOCTOR:-true}"
 
 # Telegram 节点推送：等于 true 时，每次节点链接更新后自动发到你的 Telegram。
@@ -171,6 +173,28 @@ pid_running() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# port_listening：确认 sing-box 真的在本地端口上监听。
+# 只查 pid 不够：进程活着但没绑上端口的"活死进程"（网络中断窗口期启动失败的遗留）
+# 会让 doctor 永远误判健康，链接断几十小时都不自愈。
+# 依次用 ss / netstat 检测 LISTEN；两者都没有时用 curl 探测
+# （拿到任何 HTTP 应答都算活，连接被拒/超时才算死）；什么手段都没有就放行，不误杀。
+port_listening() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -tln 2>/dev/null | grep -qE ":${LOCAL_PORT}[[:space:]]"
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -tln 2>/dev/null | grep -qE ":${LOCAL_PORT}[[:space:]]"
+    return $?
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    code="$(curl -o /dev/null -s --max-time 3 -w '%{http_code}' "http://127.0.0.1:${LOCAL_PORT}/" || true)"
+    [ -n "$code" ] && [ "$code" != "000" ]
+    return $?
+  fi
+  return 0
+}
+
 stop_process() {
   pid_file="$1"
   [ -s "$pid_file" ] || return 0
@@ -203,7 +227,12 @@ stop_all() {
 
 show_status() {
   if pid_running "$SB_PID_FILE"; then
-    printf 'sing-box:    running, PID %s\n' "$(cat "$SB_PID_FILE")"
+    if port_listening; then
+      printf 'sing-box:    running, PID %s\n' "$(cat "$SB_PID_FILE")"
+    else
+      printf 'sing-box:    running, PID %s（但端口 %s 未监听，属异常；doctor 会自动重新拉起）\n' \
+        "$(cat "$SB_PID_FILE")" "$LOCAL_PORT"
+    fi
   else
     printf 'sing-box:    stopped\n'
   fi
@@ -541,11 +570,6 @@ install_manager
 # 仅在交互式安装时询问 Telegram 配置（-f 指定配置或非交互环境自动跳过）。
 [ "$ACTION" = "install" ] && ask_telegram
 
-# 配置初始化（模板生成、保存 config.conf、check 校验）只在 install 时执行。
-# start/restart/doctor/update 必须保留现有的 sing-box.json：
-# 否则每次运行（含 cron 每 2 分钟的 doctor）都会把 fanout 注入的
-# socks 出站和路由规则冲成直连模板，面板里的绑定会被反复抹掉。
-if [ "$ACTION" = "install" ]; then
 if [ -z "$UUID" ]; then
   UUID="$("$SB_BIN" generate uuid)" || exit 1
 fi
@@ -632,13 +656,23 @@ env \
     printf '错误: sing-box 配置检查失败\n' >&2
     exit 1
   }
-fi
 
 # ── 启动进程（standalone，供 install/restart/doctor 复用）───────────
 
 # start_singbox：只启动 sing-box，不影响 cloudflared，域名保持不变。
 start_singbox() {
   printf '正在启动 sing-box...\n'
+
+  # 防御：先清掉 pid 文件里可能残留的旧实例。
+  # "进程活着但没监听端口"的旧实例不清掉的话会一直占着 pid 文件，
+  # 新实例起来后 status/doctor 看到的还是旧 pid，误判继续。
+  if [ -s "$SB_PID_FILE" ]; then
+    old_pid="$(cat "$SB_PID_FILE" 2>/dev/null || true)"
+    case "$old_pid" in
+      ''|*[!0-9]*) ;;
+      *) kill "$old_pid" 2>/dev/null || true; sleep 1 ;;
+    esac
+  fi
 
   nohup env \
     GOMAXPROCS=1 \
@@ -679,32 +713,6 @@ build_vless_link() {
   chmod 600 "$SUB_FILE"
 
   SUB_URL="未发布在线订阅"
-
-  # 同步刷新 node-info.txt（面板展示的节点信息），否则这里只更新了订阅文件，
-  # 而 node-info 是 install 末尾单独写的，doctor 换域名后会把旧域名漏掉。
-  cat >"$NODE_FILE" <<EOF
-协议: VLESS
-地址: ${DOMAIN}
-端口: 443
-UUID: ${UUID}
-传输: WebSocket
-路径: ${WS_PATH}
-Host: ${DOMAIN}
-TLS: 开启
-SNI: ${DOMAIN}
-
-节点链接:
-${VLESS_LINK}
-
-订阅链接:
-${SUB_URL}
-EOF
-
-  chmod 600 "$NODE_FILE"
-
-  # 订阅/节点链接更新后推送 TG（含 install/restart/doctor/start 等所有路径）。
-  # tg_send_node 自带去重：链接没变不打扰，只有真的换了域名才发送。
-  tg_send_node
 }
 
 # start_cloudflared：启动 cloudflared 并等待临时域名；域名写入全局 DOMAIN/VLESS_LINK。
@@ -713,11 +721,6 @@ start_cloudflared() {
   printf '正在启动 Cloudflare 临时隧道...\n'
 
   : >"${STATE_DIR}/cloudflared-empty.yml"
-
-  # 必须清空旧日志再启动：trycloudflare 域名在旧日志里残留，
-  # 不清的话下面的等待循环第一轮就会从旧日志提取到旧域名并立即 break，
-  # 新进程分配的新域名反而永远不会被读到，订阅会被写成失效的旧地址。
-  : >"$CF_LOG"
 
   nohup env \
     GOMAXPROCS=1 \
@@ -769,7 +772,13 @@ start_cloudflared() {
 if [ "$ACTION" = "install" ] || [ "$ACTION" = "restart" ] || [ "$ACTION" = "start" ] || [ "$ACTION" = "doctor" ]; then
   need_sb=false
   need_cf=false
-  pid_running "$SB_PID_FILE" || need_sb=true
+  # sing-box 健康 = 进程存活 且 本地端口真的在监听（防"活死进程"误判）。
+  # cloudflared 没有固定的本地监听口可查，维持只看进程。
+  if pid_running "$SB_PID_FILE" && port_listening; then
+    :
+  else
+    need_sb=true
+  fi
   pid_running "$CF_PID_FILE" || need_cf=true
 
   # start：两个都在运行则直接显示状态并退出（不改动域名）。
@@ -894,8 +903,28 @@ if [ "$SUBSCRIBE" = "true" ]; then
   publish_gist || true
 fi
 
-# 节点信息与订阅文件已由 build_vless_link 生成（start_cloudflared / doctor 路径也走它），
-# 这里不再重复写 NODE_FILE；tg_send_node 也已在 build_vless_link 内统一调用。
+cat >"$NODE_FILE" <<EOF
+协议: VLESS
+地址: ${DOMAIN}
+端口: 443
+UUID: ${UUID}
+传输: WebSocket
+路径: ${WS_PATH}
+Host: ${DOMAIN}
+TLS: 开启
+SNI: ${DOMAIN}
+
+节点链接:
+${VLESS_LINK}
+
+订阅链接:
+${SUB_URL}
+EOF
+
+chmod 600 "$NODE_FILE"
+
+# 节点链接更新后推送到 Telegram（已配置且链接有变化时才发送）
+tg_send_node
 
 if [ "$ENABLE_CRON" = "true" ] && command -v crontab >/dev/null 2>&1; then
   cron_boot="@reboot sleep 20; ${MANAGER} start >/dev/null 2>&1"
